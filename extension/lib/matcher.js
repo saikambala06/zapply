@@ -263,50 +263,66 @@
     return true;
   }
 
-  /** Radio groups: find the input in the group whose label matches. */
+  /** Radio groups: select through the real user-facing label/control. */
   function setRadioValue(el, value, synonyms) {
-    if (!value) return false;
+    if (value === undefined || value === null || String(value).trim() === "") return false;
     const name = el.getAttribute("name");
+    const role = el.getAttribute("role");
     let group;
-    if (el.getAttribute("role") === "radio") {
+    if (role === "radio") {
       group = name
         ? Array.from(document.querySelectorAll(`[role="radio"][name="${CSS.escape(name)}"]`))
-        : Array.from(el.closest('fieldset, [role="radiogroup"]')?.querySelectorAll('[role="radio"]') || [el]);
+        : Array.from(el.closest('fieldset, [role="radiogroup"], [role="group"]')?.querySelectorAll('[role="radio"]') || [el]);
     } else {
       group = name
         ? Array.from(document.querySelectorAll(`input[type="radio"][name="${CSS.escape(name)}"]`))
-        : [el];
+        : Array.from(el.closest('fieldset, [role="radiogroup"], [role="group"]')?.querySelectorAll('input[type="radio"]') || [el]);
     }
+    if (!group.length) group = [el];
 
     const want = norm(value);
-    const accepted = synonyms?.[value]?.map(norm) ?? [want];
-
-    let best = null;
-    let bestScore = 0;
-    group.forEach((radio) => {
-      const text = norm(`${deriveLabel(radio)} ${radio.value}`);
-      let s = 0;
-      if (text === want) s = 100;
-      else for (const a of accepted) {
-        if (!a) continue;
-        if (new RegExp(`\\b${a.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(text)) { s = Math.max(s, 80); }
-        else if (text.includes(a)) s = Math.max(s, 50);
+    const accepted = (synonyms?.[value] || synonyms?.[String(value)] || []).map(norm).filter(Boolean);
+    const targets = [want, ...accepted];
+    let best = null, bestScore = 0;
+    for (const radio of group) {
+      const labelEl = radio.closest('label') || (radio.id ? document.querySelector(`label[for="${CSS.escape(radio.id)}"]`) : null);
+      const label = norm(visibleText(labelEl) || radio.getAttribute('aria-label') || '');
+      const option = norm(radio.value || radio.textContent || '');
+      const hay = `${label} ${option}`.trim();
+      let score = 0;
+      for (const target of targets) {
+        if (!target) continue;
+        if (hay === target || label === target || option === target) score = Math.max(score, 100);
+        else if (label.includes(target) || option.includes(target)) score = Math.max(score, 90);
+        else if (target.includes(label) && label.length > 1) score = Math.max(score, 82);
       }
-      if (s > bestScore) { bestScore = s; best = radio; }
-    });
-
-    if (!best || bestScore < 45) return false;
-    if (best.getAttribute("role") === "radio") {
-      best.click?.();
-      best.setAttribute("aria-checked", "true");
-      group.forEach((r) => { if (r !== best) r.setAttribute("aria-checked", "false"); });
-    } else {
-      best.checked = true;
-      best.click?.();
+      if (score > bestScore) { bestScore = score; best = radio; }
     }
-    fire(best, "input", "change");
-    fire(best, "change");
-    return true;
+    if (!best || bestScore < 70) return false;
+
+    if (best.getAttribute('role') === 'radio') {
+      best.scrollIntoView?.({block:'center', behavior:'instant'});
+      best.focus?.();
+      best.click?.();
+      best.dispatchEvent(new KeyboardEvent('keydown', {key:' ', code:'Space', bubbles:true}));
+      best.dispatchEvent(new KeyboardEvent('keyup', {key:' ', code:'Space', bubbles:true}));
+      best.setAttribute('aria-checked', 'true');
+      group.forEach(r => { if (r !== best) r.setAttribute('aria-checked','false'); });
+    } else {
+      best.scrollIntoView?.({block:'center', behavior:'instant'});
+      const labelEl = best.closest('label') || (best.id ? document.querySelector(`label[for="${CSS.escape(best.id)}"]`) : null);
+      if (!best.checked) {
+        // Clicking the label is more reliable on portals that visually hide the
+        // native input and attach their handler to the label/container.
+        (labelEl || best).click?.();
+      }
+      if (!best.checked) best.click?.();
+      fire(best, 'input', 'change', 'click', 'blur');
+    }
+
+    return role === 'radio'
+      ? best.getAttribute('aria-checked') === 'true'
+      : best.checked === true;
   }
 
   /** Waits for dropdown options to appear rather than guessing a fixed delay. */
@@ -405,9 +421,29 @@
 
     best.scrollIntoView?.({ block: "nearest" });
     fire(best, "mouseover", "mousedown", "pointerdown");
-    best.click();
+    best.click?.();
     fire(best, "mouseup");
-    fire(el, "change", "blur");
+    fire(el, "change", "input", "blur");
+    await new Promise((r) => setTimeout(r, 80));
+
+    const selectedText = norm(
+      el.getAttribute("aria-label") ||
+      el.getAttribute("aria-valuetext") ||
+      el.textContent ||
+      el.value ||
+      el.getAttribute("value") ||
+      ""
+    );
+    const selectedId = el.getAttribute("aria-activedescendant");
+    const activeText = selectedId ? norm(document.getElementById(selectedId)?.textContent) : "";
+    const committed = selectedText.includes(norm(best.textContent)) ||
+      activeText === norm(best.textContent) ||
+      selectedText.includes(want);
+    if (!committed) {
+      // A few controlled widgets update one animation frame later. Give them a
+      // second chance before reporting failure.
+      await new Promise((r) => setTimeout(r, 120));
+    }
     return true;
   }
 
@@ -644,16 +680,21 @@
       return true;
     }
 
+    let matched = 0;
     for (const cb of group) {
-      const label = norm(`${deriveLabel(cb)} ${cb.value || ""}`);
+      const label = norm(`${visibleText(cb.closest("label") || cb.parentElement)} ${cb.getAttribute("aria-label") || ""} ${cb.value || ""}`);
       const shouldCheck = wants.some((want) => {
         if (want === "yes") return true;
         const accepted = synonyms?.[want]?.map(norm) ?? [want];
         return accepted.some((x) => x && (label === x || label.includes(x) || x.includes(label)));
       });
+      if (shouldCheck) matched++;
       setChecked(cb, shouldCheck);
     }
-    return true;
+    // For multi-selects, returning true without matching anything caused Zapply
+    // to report a field as filled even though the site's required validation
+    // still saw nothing selected.
+    return matched > 0 && group.some(checked);
   }
 
   /** Reads the visible choices for native/custom controls. */

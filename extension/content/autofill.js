@@ -175,6 +175,88 @@
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+
+  /** Verify that the website actually accepted a value, not merely that a
+   * setter/click ran. This is what prevents the extension from saying "filled"
+   * while the ATS still shows "This field is required". */
+  function verifyField(field, expected) {
+    const el = field.el;
+    const kind = field.kind;
+    const want = M.norm(expected);
+    const visible = (node) => M.norm(node?.textContent || node?.getAttribute?.('aria-label') || node?.getAttribute?.('aria-valuetext') || '');
+    if (kind === "radio") {
+      const role = el.getAttribute('role');
+      const name = el.getAttribute("name");
+      const group = role === 'radio'
+        ? (name ? Array.from(document.querySelectorAll(`[role="radio"][name="${CSS.escape(name)}"]`)) : Array.from(el.closest('fieldset, [role="radiogroup"], [role="group"]')?.querySelectorAll('[role="radio"]') || [el]))
+        : (name ? Array.from(document.querySelectorAll(`input[type="radio"][name="${CSS.escape(name)}"]`)) : Array.from(el.closest('fieldset, [role="radiogroup"], [role="group"]')?.querySelectorAll('input[type="radio"]') || [el]));
+      return group.some(r => role === 'radio' ? r.getAttribute('aria-checked') === 'true' : r.checked === true);
+    }
+    if (kind === "checkbox") {
+      const role = el.getAttribute("role");
+      const name = el.getAttribute("name");
+      const group = role === "checkbox"
+        ? (name ? Array.from(document.querySelectorAll(`[role="checkbox"][name="${CSS.escape(name)}"]`)) : [el])
+        : (name ? Array.from(document.querySelectorAll(`input[type="checkbox"][name="${CSS.escape(name)}"]`)) : [el]);
+      const checked = group.filter(c => role === 'checkbox' ? c.getAttribute('aria-checked') === 'true' : c.checked).length;
+      if (/^(no|false|unchecked|none|0)$/i.test(String(expected))) return checked === 0;
+      return checked > 0;
+    }
+    if (kind === "select") {
+      if (el.tagName === "SELECT") {
+        const opt = el.options[el.selectedIndex];
+        if (!opt || !opt.value || /^(select|choose|please|--)/i.test(opt.textContent || '')) return false;
+        const text = M.norm(opt.textContent), val = M.norm(opt.value);
+        return text === want || val === want || text.includes(want) || want.includes(text);
+      }
+      // Custom selects: prefer the selected/active option and then the control's
+      // displayed value. Do not treat the question label itself as a selection.
+      const selected = el.querySelector?.('[aria-selected="true"]') || document.querySelector('[role="option"][aria-selected="true"]');
+      const text = M.norm(el.getAttribute('aria-valuetext') || el.value || (selected && selected.textContent) || '');
+      const buttonText = visible(el);
+      return Boolean(text || buttonText) && (text.includes(want) || want.includes(text) || buttonText.includes(want));
+    }
+    if (kind === "file") return Boolean(el.files?.length);
+    return M.norm(el.value) === want || M.norm(el.value).includes(want);
+  }
+
+
+  async function fillAndVerify(field, value, rule) {
+    const quirks = state.adapter?.quirks ?? {};
+    let ok = false;
+    const apply = async () => {
+      if (field.kind === "select") {
+        return field.el.tagName === "SELECT"
+          ? M.setSelectValue(field.el, value, rule?.options)
+          : await M.setComboboxValue(field.el, value, quirks.dropdownDelay ?? 900, rule?.options);
+      }
+      if (field.kind === "radio") return M.setRadioValue(field.el, value, rule?.options);
+      if (field.kind === "checkbox") return M.setCheckboxValue(field.el, value, rule?.options);
+      if (field.kind === "file") return M.setFileValue(field.el, value);
+      return M.setTextValue(field.el, String(value));
+    };
+
+    ok = await apply();
+    await sleep(80);
+    if (!ok || !verifyField(field, value)) {
+      // Controlled components occasionally render after the first event. Retry
+      // once using the same UI interaction, then verify again.
+      ok = await apply();
+      await sleep(140);
+    }
+    return ok && verifyField(field, value);
+  }
+
+  function collectRequiredErrors() {
+    const nodes = Array.from(document.querySelectorAll(
+      '[aria-invalid="true"], .error, .field-error, [class*="error"], [data-automation-id*="error"], [role="alert"]'
+    ));
+    return nodes.filter(n => {
+      const text = (n.textContent || "").trim();
+      return text && /required|please select|please enter|invalid|must be/i.test(text) && n.getBoundingClientRect().height > 0;
+    }).map(n => (n.textContent || "").trim()).slice(0, 30);
+  }
+
   async function fillField(field, profile, settings) {
     const { el, label, kind } = field;
     const quirks = state.adapter?.quirks ?? {};
@@ -199,23 +281,8 @@
 
       if (!value) return { key: rule.key, status: "no-value" };
 
-      let done = false;
-      if (kind === "select") {
-        if (el.tagName === "SELECT") {
-          done = M.setSelectValue(el, value, rule.options);
-        } else {
-          done = await M.setComboboxValue(el, value, quirks.dropdownDelay ?? 260, rule.options);
-        }
-      } else if (kind === "radio") {
-        done = M.setRadioValue(el, value, rule.options);
-      } else if (kind === "checkbox") {
-        done = M.setCheckboxValue(el, value, rule.options);
-      } else if (kind === "file") {
-        done = false;
-      } else {
-        done = M.setTextValue(el, String(value));
-      }
-
+      if (kind === "file") return { key: rule.key, status: "failed", label };
+      const done = await fillAndVerify(field, value, rule);
       return { key: rule.key, status: done ? "filled" : "failed", label };
     }
 
@@ -223,19 +290,10 @@
     if (settings?.reuseSavedResponses !== false) {
       const saved = findSavedAnswer(label);
       if (saved?.answer) {
-        let done = false;
-        if (kind === "select") {
-          done = el.tagName === "SELECT"
-            ? M.setSelectValue(el, saved.answer)
-            : await M.setComboboxValue(el, saved.answer, quirks.dropdownDelay ?? 260);
-        } else if (kind === "radio") {
-          done = M.setRadioValue(el, saved.answer);
-        } else if (kind === "checkbox") {
-          done = M.setCheckboxValue(el, saved.answer);
-        } else if (kind !== "file") {
-          done = M.setTextValue(el, saved.answer);
+        if (kind !== "file") {
+          const done = await fillAndVerify(field, saved.answer, null);
+          if (done) return { key: "saved-answer", status: "filled", label, fromMemory: true };
         }
-        if (done) return { key: "saved-answer", status: "filled", label, fromMemory: true };
       }
     }
 
@@ -324,25 +382,11 @@
       if (!res?.ok || !res.data?.answer) continue;
 
       let answer = res.data.answer;
-      let ok = false;
-
-      if (field.kind === "select") {
-        answer = String(answer).trim();
-        ok = field.el.tagName === "SELECT"
-          ? M.setSelectValue(field.el, answer)
-          : await M.setComboboxValue(field.el, answer);
-      } else if (field.kind === "radio") {
-        answer = String(answer).trim();
-        ok = M.setRadioValue(field.el, answer);
-      } else if (field.kind === "checkbox") {
-        if (typeof answer === "string") {
-          try { answer = JSON.parse(answer); } catch { /* string fallback */ }
-        }
-        ok = M.setCheckboxValue(field.el, answer);
-      } else {
-        answer = String(answer).trim();
-        ok = M.setTextValue(field.el, answer);
+      if (field.kind !== "checkbox") answer = String(answer).trim();
+      else if (typeof answer === "string") {
+        try { answer = JSON.parse(answer); } catch { /* comma-separated fallback */ }
       }
+      const ok = await fillAndVerify(field, answer, null);
 
       if (ok) {
         done++;
@@ -418,11 +462,40 @@
       if (delay) await sleep(delay);
     }
 
+    // A failed interaction is not an answered field. Put it back into the
+    // retry/AI queue instead of counting it as merely "failed" and moving on.
+    if (result.failed) {
+      for (const field of fields) {
+        if (!state.unmatched.includes(field) && !M.hasValue(field.el) && field.kind !== "file") {
+          state.unmatched.push(field);
+          mark(field.el);
+        }
+      }
+      result.unmatched = state.unmatched.length;
+    }
+
     // Premium: draft the open-ended questions that are left.
     result.drafted = await answerRemaining(session, meta, settings);
     if (result.drafted) {
       result.filled += result.drafted;
       result.unmatched = Math.max(0, result.unmatched - result.drafted);
+    }
+
+    // Final pass: give controlled frameworks a moment to commit state, then
+    // detect actual validation errors. This catches cases where the DOM looked
+    // filled but the ATS's internal form state did not change.
+    await sleep(180);
+    const validationErrors = collectRequiredErrors();
+    result.validationErrors = validationErrors;
+    if (validationErrors.length) {
+      for (const field of fields) {
+        if (field.kind === "file") continue;
+        if (!M.hasValue(field.el) && !state.unmatched.includes(field)) {
+          state.unmatched.push(field);
+          mark(field.el);
+        }
+      }
+      result.unmatched = state.unmatched.length;
     }
 
     result.durationMs = Math.round(performance.now() - started);
@@ -449,7 +522,7 @@
         body:
           scoreLine + draftLine +
           (result.unmatched
-            ? "The highlighted questions need your answer. Type once and Zapply remembers."
+            ? `${result.validationErrors?.length ? `${result.validationErrors.length} validation message${result.validationErrors.length === 1 ? "" : "s"} detected. ` : ""}The highlighted questions need your answer. Type once and Zapply remembers.`
             : "Review it, then submit."),
         autoHide: !result.unmatched && !result.drafted,
       });
