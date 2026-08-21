@@ -275,8 +275,7 @@ export async function extractResumeText({
 
   if (kind === "doc") {
     try {
-      const module = await import("word-extractor");
-      const WordExtractor: any = (module as any).default ?? module;
+      const WordExtractor = (await import("word-extractor")).default;
       const extractor = new WordExtractor();
       const document = await extractor.extract(buffer);
       return normaliseExtractedText(document?.getBody?.());
