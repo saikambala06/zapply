@@ -128,6 +128,7 @@ const ProfileSchema = new Schema(
       zip: String,
       country: { type: String, default: "United States" },
       nationality: String,
+      citizenship: String,
       languages: { type: [String], default: [] },
     },
 

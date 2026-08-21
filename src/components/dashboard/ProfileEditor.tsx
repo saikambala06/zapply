@@ -202,8 +202,10 @@ export default function ProfileEditor({
       onSaved?.(merged);
       setSaved(true);
       setTimeout(() => setSaved(false), 2200);
+      return true;
     } catch (e: any) {
       setError(e.message);
+      return false;
     } finally {
       setSaving(false);
     }
@@ -220,7 +222,10 @@ export default function ProfileEditor({
     try {
       // Uploading from the toolbar should also store the file, so it gets
       // attached to applications that ask for one — not just read and discarded.
-      if (alsoAttach) await uploadResume(file).catch(() => {});
+      if (alsoAttach) {
+        const attached = await uploadResume(file);
+        if (!attached) throw new Error("The resume was parsed but could not be saved to your profile. Please retry the upload.");
+      }
 
       const fd = new FormData();
       fd.append("file", file);
@@ -236,33 +241,45 @@ export default function ProfileEditor({
   }
 
   /** Merges parsed sections in, keeping anything the user already filled in. */
-  function acceptParsed(sections: Record<string, boolean>) {
-    setP((prev: any) => {
-      const next = { ...prev };
-      if (sections.personal && parsed.personal) {
-        next.personal = { ...prev.personal };
-        for (const [k, v] of Object.entries(parsed.personal)) {
-          if (v && !next.personal[k]) next.personal[k] = v;
-        }
+  async function acceptParsed(sections: Record<string, boolean>) {
+    const prev = p;
+    const next = { ...prev, personal: { ...(prev.personal ?? {}) } };
+    if (sections.personal && parsed.personal) {
+      next.personal = { ...prev.personal };
+      for (const [k, v] of Object.entries(parsed.personal)) {
+        if (v && !next.personal[k]) next.personal[k] = v;
       }
-      if (sections.experience && parsed.experience?.length) next.experience = parsed.experience;
-      if (sections.education && parsed.education?.length) next.education = parsed.education;
-      if (sections.skills && parsed.skills?.length) {
-        next.skills = Array.from(new Set([...(prev.skills ?? []), ...parsed.skills]));
-      }
-      if (sections.websites && parsed.websites?.length) {
-        const have = new Set((prev.websites ?? []).map((w: any) => w.url));
-        next.websites = [...(prev.websites ?? []), ...parsed.websites.filter((w: any) => w.url && !have.has(w.url))];
-      }
-      if (sections.summary && parsed.summary) next.summary = parsed.summary;
-      if (sections.skills && parsed.targetRole && !prev.targetRole) next.targetRole = parsed.targetRole;
+    }
+    if (sections.experience && parsed.experience?.length) next.experience = parsed.experience;
+    if (sections.education && parsed.education?.length) next.education = parsed.education;
+    if (sections.skills && parsed.skills?.length) {
+      next.skills = Array.from(new Set([...(prev.skills ?? []), ...parsed.skills]));
+    }
+    if (sections.websites && parsed.websites?.length) {
+      const have = new Set((prev.websites ?? []).map((w: any) => w.url));
+      next.websites = [...(prev.websites ?? []), ...parsed.websites.filter((w: any) => w.url && !have.has(w.url))];
+    }
+    if (sections.summary && parsed.summary) next.summary = parsed.summary;
+    if (sections.skills && parsed.targetRole && !prev.targetRole) next.targetRole = parsed.targetRole;
+    if (sections.workAuth && parsed.workAuth) {
+      next.workAuth = { ...(prev.workAuth ?? {}) };
+      for (const [k, v] of Object.entries(parsed.workAuth)) if (v && !next.workAuth[k]) next.workAuth[k] = v;
+    }
+    if (sections.compensation && parsed.compensation) {
+      next.compensation = { ...(prev.compensation ?? {}) };
+      for (const [k, v] of Object.entries(parsed.compensation)) if (v && !next.compensation[k]) next.compensation[k] = v;
+    }
+    if (sections.eeo && parsed.eeo) {
+      next.eeo = { ...(prev.eeo ?? {}) };
+      for (const [k, v] of Object.entries(parsed.eeo)) if (v && !next.eeo[k]) next.eeo[k] = v;
+    }
 
-      // Save straight away — the user already confirmed in the review dialog,
-      // and losing parsed data to a forgotten "Save changes" click is a bad trade.
-      queueMicrotask(() => saveProfile(next));
-      return next;
-    });
-    setParsed(null);
+    // Persist only after the complete merged object exists. The old implementation
+    // performed a network side-effect inside a React state updater, which could
+    // race under concurrent rendering and save the previous draft.
+    setP(next);
+    const ok = await saveProfile(next);
+    if (ok) setParsed(null);
   }
 
   /** Documents live outside the PATCH payload, so they need their own call. */
@@ -276,17 +293,23 @@ export default function ProfileEditor({
   }
 
   async function uploadResume(file: File, kind = "resume") {
-    const fd = new FormData();
-    fd.append("file", file);
-    fd.append("profileId", p._id);
-    fd.append("kind", kind);
-    const res = await fetch("/api/resume/upload", { method: "POST", body: fd });
-    const json = await res.json();
-    if (!res.ok) { setError(json.error); return; }
-    setP((prev: any) => ({
-      ...prev,
-      documents: [...(prev.documents ?? []), { ...json.data, _id: json.data.id }],
-    }));
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("profileId", p._id);
+      fd.append("kind", kind);
+      const res = await fetch("/api/resume/upload", { method: "POST", body: fd });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) { setError(json.error || "The resume could not be saved."); return false; }
+      setP((prev: any) => ({
+        ...prev,
+        documents: [...(prev.documents ?? []), { ...json.data, _id: json.data.id }],
+      }));
+      return true;
+    } catch (e: any) {
+      setError(e?.message || "The resume upload failed.");
+      return false;
+    }
   }
 
   const addRow = (key: string, blank: any) =>
@@ -494,12 +517,12 @@ export default function ProfileEditor({
               <label className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-line bg-canvas px-6 py-10 text-center transition hover:border-brand-300 hover:bg-brand-50">
                 <Upload className="h-6 w-6 text-brand-500" />
                 <span className="mt-3 text-[15px] font-semibold">Upload your resume</span>
-                <span className="mt-1 text-[13px] text-ink-soft">PDF, DOC, DOCX or TXT · up to 8 MB</span>
+                <span className="mt-1 text-[13px] text-ink-soft">PDF, DOC, DOCX, TXT, PNG, JPG or WEBP · up to 12 MB</span>
                 <span className="mt-1 text-[12px] text-ink-faint">Attached automatically to applications that ask for a file</span>
                 <input
                   type="file"
                   className="hidden"
-                  accept=".pdf,.doc,.docx,.txt"
+                  accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.webp"
                   onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadResume(f); }}
                 />
               </label>
@@ -522,7 +545,7 @@ export default function ProfileEditor({
                       <input
                         type="file"
                         className="hidden"
-                        accept=".pdf,.doc,.docx,.txt"
+                        accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.webp"
                         disabled={parsing}
                         onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) readResume(f); }}
                       />
@@ -632,6 +655,9 @@ function ParsedReview({
     ["education", `Education (${parsed.education?.length ?? 0})`, (parsed.education ?? []).map((e: any) => `${e.degree} · ${e.school}`).join(" · ")],
     ["skills", `Skills (${parsed.skills?.length ?? 0})`, (parsed.skills ?? []).slice(0, 8).join(", ")],
     ["websites", `Links (${parsed.websites?.length ?? 0})`, (parsed.websites ?? []).map((w: any) => w.label).join(", ")],
+    ["workAuth", "Work eligibility", [parsed.workAuth?.authorizedToWork, parsed.workAuth?.requireSponsorship, parsed.workAuth?.visaStatus].filter(Boolean).join(" · ")],
+    ["compensation", "Compensation", [parsed.compensation?.desiredSalary, parsed.compensation?.currentSalary].filter(Boolean).join(" · ")],
+    ["eeo", "EEO", [parsed.eeo?.gender, parsed.eeo?.race, parsed.eeo?.veteranStatus, parsed.eeo?.disabilityStatus].filter(Boolean).join(" · ")],
     ["summary", "Summary", parsed.summary?.slice(0, 90)],
   ].filter(([, , preview]) => preview) as [string, string, string][];
 

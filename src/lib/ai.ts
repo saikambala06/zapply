@@ -30,7 +30,7 @@ export function aiEnabled() {
 
 /** What the UI should tell a user when the key is missing. */
 export const AI_SETUP_HINT =
-  "AI features need a GROQ_API_KEY on the server. Get a free one at console.groq.com.";
+  "AI features need GROQ_API_KEY/AI_API_KEY. For scanned PDF/image OCR, also configure GEMINI_API_KEY.";
 
 type Message = { role: "system" | "user" | "assistant"; content: string };
 
@@ -176,21 +176,36 @@ export function parseJson<T>(raw: string): T {
 /** Compact profile text used as context for scoring and answer generation. */
 export function profileToContext(p: any) {
   const exp = (p.experience ?? [])
-    .slice(0, 6)
+    .slice(0, 10)
     .map((e: any) => `- ${e.title} at ${e.company} (${e.startDate}–${e.current ? "present" : e.endDate}). ${e.description ?? ""}`)
     .join("\n");
   const edu = (p.education ?? [])
-    .map((e: any) => `- ${e.degree} in ${e.fieldOfStudy}, ${e.school} (${e.endDate})`)
+    .map((e: any) => `- ${e.degree} in ${e.fieldOfStudy}, ${e.school} (${e.startDate}–${e.current ? "present" : e.endDate}). ${e.description ?? ""}`)
+    .join("\n");
+  const websites = (p.websites ?? [])
+    .map((w: any) => `${w.label || "Website"}: ${w.url || ""}`)
+    .filter(Boolean)
     .join("\n");
   return [
     `Name: ${p.personal?.firstName ?? ""} ${p.personal?.lastName ?? ""}`,
+    `Email: ${p.personal?.email ?? ""}`,
+    `Phone: ${p.personal?.phone ?? ""}`,
     `Target role: ${p.targetRole || "not specified"}`,
     `Location: ${[p.personal?.city, p.personal?.state, p.personal?.country].filter(Boolean).join(", ")}`,
+    p.personal?.languages?.length ? `Languages: ${p.personal.languages.join(", ")}` : "",
     p.summary ? `Summary: ${p.summary}` : "",
-    exp ? `Experience:\n${exp}` : "",
-    edu ? `Education:\n${edu}` : "",
+    exp ? `Experience:
+${exp}` : "",
+    edu ? `Education:
+${edu}` : "",
     p.skills?.length ? `Skills: ${p.skills.join(", ")}` : "",
-    `Work authorization: ${p.workAuth?.authorizedToWork ?? "?"}; needs sponsorship: ${p.workAuth?.requireSponsorship ?? "?"}`,
+    p.certifications?.length ? `Certifications: ${p.certifications.join(", ")}` : "",
+    websites ? `Websites:
+${websites}` : "",
+    `Work authorization: ${p.workAuth?.authorizedToWork ?? "?"}; needs sponsorship: ${p.workAuth?.requireSponsorship ?? "?"}; visa/work status: ${p.workAuth?.visaStatus ?? "?"}`,
+    `Availability: ${p.workAuth?.availableStartDate ?? "?"}; notice period: ${p.workAuth?.noticePeriod ?? "?"}; relocation: ${p.workAuth?.willingToRelocate ?? "?"}; remote preference: ${p.workAuth?.remotePreference ?? "?"}`,
+    `Compensation: desired ${p.compensation?.desiredSalary ?? "?"} ${p.compensation?.salaryCurrency ?? "USD"} (${p.compensation?.salaryPeriod ?? "year"}); current ${p.compensation?.currentSalary ?? "?"}`,
+    `EEO (only use when the application explicitly asks): gender ${p.eeo?.gender ?? "?"}; race/ethnicity ${p.eeo?.race ?? "?"}; Hispanic/Latino ${p.eeo?.hispanicLatino ?? "?"}; veteran ${p.eeo?.veteranStatus ?? "?"}; disability ${p.eeo?.disabilityStatus ?? "?"}; decline to self-identify ${p.eeo?.declineToSelfIdentify ? "Yes" : "No"}`,
   ]
     .filter(Boolean)
     .join("\n");
@@ -207,7 +222,7 @@ export function profileToContext(p: any) {
  * input we extract first. unpdf wraps pdf.js and runs in serverless without
  * native bindings; mammoth handles .docx.
  */
-export type ResumeFileKind = "pdf" | "doc" | "docx" | "text";
+export type ResumeFileKind = "pdf" | "doc" | "docx" | "text" | "image";
 
 function detectResumeFileKind(buffer: Buffer, mimeType: string, filename: string): ResumeFileKind | null {
   const name = filename.toLowerCase();
@@ -223,6 +238,7 @@ function detectResumeFileKind(buffer: Buffer, mimeType: string, filename: string
   if (mime === "application/msword" || /\.doc$/i.test(name)) return "doc";
   if (mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || /\.docx$/i.test(name)) return "docx";
   if (mime.startsWith("text/") || /\.(txt|md)$/i.test(name)) return "text";
+  if (mime.startsWith("image/") || /\.(png|jpe?g|webp)$/i.test(name)) return "image";
   return null;
 }
 
@@ -249,7 +265,7 @@ export async function extractResumeText({
   const kind = detectResumeFileKind(buffer, mimeType, filename);
 
   if (!kind) {
-    throw new Error("Unsupported resume format. Upload PDF, DOC, DOCX or TXT.");
+    throw new Error("Unsupported resume format. Upload PDF, DOC, DOCX, TXT, PNG, JPG or WEBP.");
   }
 
   if (kind === "pdf") {
@@ -289,23 +305,96 @@ export async function extractResumeText({
   return normaliseExtractedText(buffer.toString("utf8"));
 }
 
+/**
+ * Optional multimodal fallback for scanned/image-only resumes.
+ * It is deliberately opt-in: normal text extraction still uses the configured
+ * AI provider, while GEMINI_API_KEY can handle PDFs/images that contain no text
+ * layer. This avoids native OCR binaries that are unreliable on Vercel.
+ */
+async function parseResumeWithGemini({
+  buffer, mimeType, system, shape,
+}: { buffer: Buffer; mimeType: string; system: string; shape: string }) {
+  const key = process.env.GEMINI_API_KEY || "";
+  if (!key) return null;
+
+  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
+  const prompt = `${system}\n\nThe attached resume may be a scanned document. Use OCR/vision as needed. Preserve exact facts from the document and never invent missing data. Return JSON in exactly this shape:\n${shape}`;
+
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{
+        role: "user",
+        parts: [
+          { text: prompt },
+          { inline_data: { mime_type: mimeType || "application/pdf", data: buffer.toString("base64") } },
+        ],
+      }],
+      generationConfig: {
+        temperature: 0.1,
+        maxOutputTokens: 6000,
+        responseMimeType: "application/json",
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`Resume OCR failed (${res.status}). ${detail.slice(0, 180)}`);
+  }
+  const data = await res.json();
+  const text = data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text || "").join("\n").trim();
+  if (!text) throw new Error("The OCR service returned no resume data.");
+  return parseJson<Record<string, unknown>>(text);
+}
+
 /** Reads a resume file and returns structured profile sections. */
 export async function parseResumeDocument({
   buffer, mimeType, filename, system, shape,
 }: {
   buffer: Buffer; mimeType: string; filename: string; system: string; shape: string;
 }) {
-  const text = await extractResumeText({ buffer, mimeType, filename });
+  const kind = detectResumeFileKind(buffer, mimeType, filename);
+
+  // Images are vision/OCR inputs rather than text extraction inputs.
+  if (kind === "image") {
+    const parsed = await parseResumeWithGemini({ buffer, mimeType: mimeType || "image/jpeg", system, shape });
+    if (!parsed) {
+      throw new Error("This resume is an image. Add GEMINI_API_KEY to enable OCR/vision parsing, or upload a text-based PDF/DOCX.");
+    }
+    return parsed;
+  }
+
+  let text = "";
+  try {
+    text = await extractResumeText({ buffer, mimeType, filename });
+  } catch (err) {
+    // If a PDF cannot expose a usable text layer, Gemini can still read it as a
+    // document. This is the key fallback for scanned PDFs.
+    if (kind === "pdf") {
+      const parsed = await parseResumeWithGemini({ buffer, mimeType: "application/pdf", system, shape });
+      if (parsed) return parsed;
+    }
+    throw err;
+  }
 
   if (text.trim().length < 60) {
+    if (kind === "pdf") {
+      const parsed = await parseResumeWithGemini({ buffer, mimeType: "application/pdf", system, shape });
+      if (parsed) return parsed;
+    }
     throw new Error(
-      "That file has almost no readable text. If it's a scan or an image-only PDF, export a text-based PDF and try again."
+      "That file has almost no readable text. If it is a scanned/image-only resume, add GEMINI_API_KEY for OCR parsing or export a text-based PDF."
     );
   }
 
+  // Keep substantially more resume text. Truncating at 14k was causing long
+  // resumes to lose later experience, education and certifications.
   return askAIJSON<Record<string, unknown>>(
     system,
-    `Resume text:\n"""\n${text.slice(0, 14000)}\n"""\n\nReturn JSON in exactly this shape:\n${shape}`,
-    3000
+    `Resume text:\n"""\n${text.slice(0, 30000)}\n"""\n\nReturn JSON in exactly this shape:\n${shape}`,
+    6000
   );
 }

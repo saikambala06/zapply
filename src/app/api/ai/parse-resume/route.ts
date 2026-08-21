@@ -6,19 +6,22 @@ import { normalizeParsedResume } from "@/lib/profile-shape";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const MAX_BYTES = 8 * 1024 * 1024;
+const MAX_BYTES = 12 * 1024 * 1024;
 
-const SHAPE = `{"personal":{"firstName":"","middleName":"","lastName":"","email":"","phone":"","city":"","state":"","country":""},
+const SHAPE = `{"personal":{"firstName":"","middleName":"","lastName":"","preferredName":"","email":"","phone":"","phoneCountryCode":"","phoneType":"Mobile","city":"","state":"","zip":"","country":"","address":"","addressLine2":"","nationality":"","citizenship":"","languages":[]},
  "summary":"",
  "targetRole":"",
- "education":[{"school":"","degree":"","fieldOfStudy":"","gpa":"","startDate":"","endDate":"","current":false}],
- "experience":[{"company":"","title":"","location":"","startDate":"","endDate":"","current":false,"description":""}],
+ "education":[{"school":"","degree":"","fieldOfStudy":"","gpa":"","startDate":"","endDate":"","current":false,"location":"","description":""}],
+ "experience":[{"company":"","title":"","employmentType":"","location":"","locationType":"","startDate":"","endDate":"","current":false,"description":""}],
  "skills":[],
  "certifications":[],
+ "workAuth":{"authorizedToWork":"","requireSponsorship":"","workAuthType":"","visaStatus":"","willingToRelocate":"","remotePreference":"","availableStartDate":"","noticePeriod":"","over18":"","previouslyEmployedHere":"","referredBy":"","howDidYouHear":"","securityClearance":"","driversLicense":"","willingToDrugTest":"","willingToBackgroundCheck":""},
+ "compensation":{"desiredSalary":"","currentSalary":"","salaryCurrency":"USD","salaryPeriod":"year"},
+ "eeo":{"gender":"","race":"","hispanicLatino":"","veteranStatus":"","disabilityStatus":"","declineToSelfIdentify":false},
  "websites":[{"label":"LinkedIn","url":""}]}`;
 
 const SYSTEM =
-  "Extract structured data from a resume. Copy values exactly as written - never invent an employer, date, degree or number that isn't in the document. Use empty strings for anything missing. Dates as YYYY-MM. For `degree`, normalise to one of: High School Diploma, Associate's Degree, Bachelor's Degree, Master's Degree, MBA, Doctorate (PhD), Bootcamp, Other. Order experience and education newest first.";
+  "Extract structured data from a resume with high factual precision. Preserve exact names, employers, titles, dates, locations, skills, certifications, URLs, phone/email and education details. Never invent an employer, date, degree, salary, credential or answer that is not explicitly present. Use empty strings/arrays for missing data. Dates as YYYY-MM. Normalize degree only to: High School Diploma, Associate's Degree, Bachelor's Degree, Master's Degree, MBA, Doctorate (PhD), Bootcamp, Other. Order experience and education newest first. Capture every experience and education entry, not only the latest one. If a value is uncertain, leave it blank rather than guessing.";
 
 /**
  * Accepts the resume file itself (multipart) or pre-extracted text (JSON).
@@ -29,8 +32,8 @@ const SYSTEM =
  */
 export const POST = handler(async (req: Request) => {
   await requireUser(req as any);
-  if (!aiEnabled()) {
-    return fail(AI_SETUP_HINT, 503);
+  if (!aiEnabled() && !process.env.GEMINI_API_KEY) {
+    return fail("Resume parsing needs an AI provider. Configure GROQ_API_KEY/AI_API_KEY, or GEMINI_API_KEY for OCR/vision parsing.", 503);
   }
 
   const contentType = req.headers.get("content-type") ?? "";
@@ -43,7 +46,7 @@ export const POST = handler(async (req: Request) => {
     }
     const parsed = await askAIJSON<Record<string, unknown>>(
       SYSTEM,
-      `Resume text:\n"""\n${String(text).slice(0, 14000)}\n"""\n\nReturn JSON in exactly this shape:\n${SHAPE}`,
+      `Resume text:\n"""\n${String(text).slice(0, 30000)}\n"""\n\nReturn JSON in exactly this shape:\n${SHAPE}`,
       3000
     );
     return ok(normalizeParsedResume(parsed));
@@ -53,7 +56,7 @@ export const POST = handler(async (req: Request) => {
   const form = await req.formData();
   const file = form.get("file") as File | null;
   if (!file) return fail("Choose a resume file to read.", 400);
-  if (file.size > MAX_BYTES) return fail("That file is over 8 MB. Compress it and try again.", 413);
+  if (file.size > MAX_BYTES) return fail("That file is over 12 MB. Compress it and try again.", 413);
 
   const buffer = Buffer.from(await file.arrayBuffer());
   try {

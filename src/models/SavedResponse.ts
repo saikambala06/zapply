@@ -10,6 +10,8 @@ const SavedResponseSchema = new Schema(
     userId: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
     question: { type: String, required: true },
     normalizedKey: { type: String, required: true, index: true },
+    aliases: { type: [String], default: [] },
+    category: { type: String, default: "general" },
     answer: { type: String, default: "" },
     inputType: { type: String, default: "text" },      // text | textarea | select | radio | checkbox
     options: { type: [String], default: [] },          // for select/radio, the choice we picked

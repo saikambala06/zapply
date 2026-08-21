@@ -8,6 +8,19 @@ import { ok, handler, cors } from "@/lib/api";
 export const dynamic = "force-dynamic";
 export const OPTIONS = () => cors();
 
+function categorizeQuestion(q: string) {
+  const s = q.toLowerCase();
+  if (/sponsor|visa|authorized|work permit|immigration/.test(s)) return "work-authorization";
+  if (/salary|compensation|pay|rate|bonus/.test(s)) return "compensation";
+  if (/education|degree|school|university|college|gpa|major/.test(s)) return "education";
+  if (/experience|employer|company|job title|role|responsibil/.test(s)) return "experience";
+  if (/linkedin|github|portfolio|website|url/.test(s)) return "links";
+  if (/location|city|state|address|country|phone|email/.test(s)) return "contact";
+  if (/gender|race|ethnicity|veteran|disability|hispanic/.test(s)) return "eeo";
+  if (/relocat|remote|hybrid|onsite|start date|notice period|availability/.test(s)) return "availability";
+  return "general";
+}
+
 /**
  * The extension posts here after a successful autofill/submit:
  *   { application: {...}, responses: [{question, answer, inputType}] }
@@ -49,32 +62,44 @@ export const POST = handler(async (req: NextRequest) => {
 
   let savedCount = 0;
   if (Array.isArray(body.responses) && body.responses.length) {
-    const ops = body.responses
-      .filter((r: any) => r?.question && String(r.answer ?? "").trim())
-      .map((r: any) => ({
-        updateOne: {
-          filter: { userId: user._id, normalizedKey: normalizeQuestion(r.question) },
-          update: {
-            $set: {
-              userId: user._id,
-              question: r.question,
-              normalizedKey: normalizeQuestion(r.question),
-              answer: String(r.answer),
-              inputType: r.inputType || "text",
-              options: r.options || [],
-              ats: r.ats,
-              lastDomain: r.domain,
-              lastUsedAt: new Date(),
-            },
-            $inc: { useCount: 1 },
-            $setOnInsert: { source: "user" },
-          },
-          upsert: true,
-        },
-      }));
-    if (ops.length) {
-      const res = await SavedResponse.bulkWrite(ops, { ordered: false });
-      savedCount = (res.upsertedCount ?? 0) + (res.modifiedCount ?? 0);
+    for (const r of body.responses) {
+      const question = String(r?.question || "").trim();
+      const answer = String(r?.answer ?? "").trim();
+      const normalizedKey = normalizeQuestion(question);
+      if (!question || !answer || !normalizedKey) continue;
+
+      const doc = await SavedResponse.findOne({ userId: user._id, normalizedKey });
+      if (doc) {
+        const aliases = new Set([...(doc.aliases || []), question]);
+        doc.question = question;
+        doc.answer = answer;
+        doc.inputType = r.inputType || doc.inputType || "text";
+        doc.options = Array.isArray(r.options) ? r.options.slice(0, 50) : doc.options;
+        doc.ats = r.ats || doc.ats;
+        doc.lastDomain = r.domain || doc.lastDomain;
+        doc.lastUsedAt = new Date();
+        doc.category = categorizeQuestion(question);
+        doc.aliases = Array.from(aliases).slice(-30);
+        doc.useCount = (doc.useCount || 0) + 1;
+        await doc.save();
+      } else {
+        await SavedResponse.create({
+          userId: user._id,
+          question,
+          normalizedKey,
+          aliases: [question],
+          answer,
+          inputType: r.inputType || "text",
+          options: Array.isArray(r.options) ? r.options.slice(0, 50) : [],
+          ats: r.ats,
+          lastDomain: r.domain,
+          lastUsedAt: new Date(),
+          category: categorizeQuestion(question),
+          useCount: 1,
+          source: "user",
+        });
+      }
+      savedCount++;
     }
   }
 

@@ -25,6 +25,7 @@ const Body = z.object({
   ats: z.string().optional(),
   lastDomain: z.string().optional(),
   source: z.enum(["user", "ai", "imported"]).optional(),
+  category: z.string().max(80).optional(),
 });
 
 export const POST = handler(async (req: Request) => {
@@ -36,6 +37,7 @@ export const POST = handler(async (req: Request) => {
     { userId: user._id, normalizedKey: normalizeQuestion(body.question) },
     {
       $set: { ...body, userId: user._id, normalizedKey: normalizeQuestion(body.question) },
+      $addToSet: { aliases: body.question },
       $setOnInsert: { useCount: 0 },
     },
     { new: true, upsert: true, setDefaultsOnInsert: true }

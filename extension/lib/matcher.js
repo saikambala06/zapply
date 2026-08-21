@@ -828,14 +828,15 @@
     const key = normalizeQuestion(question);
     if (!key) return null;
 
-    const exact = responses.find((r) => r.normalizedKey === key);
+    const exact = responses.find((r) => r.normalizedKey === key || (r.aliases || []).some((a) => normalizeQuestion(a) === key));
     if (exact?.answer) return { ...exact, confidence: 1 };
 
     let best = null;
     let bestScore = threshold;
     responses.forEach((r) => {
       if (!r.answer) return;
-      const score = similarity(key, r.normalizedKey || normalizeQuestion(r.question));
+      const aliasScores = [r.normalizedKey || normalizeQuestion(r.question), ...(r.aliases || [])].map((a) => similarity(key, normalizeQuestion(a)));
+      const score = Math.max(...aliasScores, 0);
       if (score > bestScore) { bestScore = score; best = r; }
     });
     return best ? { ...best, confidence: bestScore } : null;
@@ -854,20 +855,37 @@
   }
 
   function hasValue(el) {
-    if (el.getAttribute("role") === "checkbox" || el.getAttribute("role") === "radio") {
-      return el.getAttribute("aria-checked") === "true";
+    const role = el.getAttribute("role");
+    const type = (el.type || "").toLowerCase();
+    if (role === "checkbox" || type === "checkbox") {
+      const name = el.getAttribute("name");
+      const group = name
+        ? Array.from(document.querySelectorAll(role === "checkbox" ? `[role="checkbox"][name="${CSS.escape(name)}"]` : `input[type="checkbox"][name="${CSS.escape(name)}"]`))
+        : [el];
+      return group.some((x) => role === "checkbox" ? x.getAttribute("aria-checked") === "true" : x.checked);
     }
-    if (el.type === "checkbox" || el.type === "radio") return el.checked;
-    if (el.type === "file") return el.files?.length > 0;
-    if (el.tagName === "BUTTON" || el.getAttribute("role") === "button") {
+    if (role === "radio" || type === "radio") {
+      const name = el.getAttribute("name");
+      const group = name
+        ? Array.from(document.querySelectorAll(role === "radio" ? `[role="radio"][name="${CSS.escape(name)}"]` : `input[type="radio"][name="${CSS.escape(name)}"]`))
+        : Array.from(el.closest('fieldset, [role="radiogroup"], [role="group"]')?.querySelectorAll(role === "radio" ? '[role="radio"]' : 'input[type="radio"]') || [el]);
+      return group.some((x) => role === "radio" ? x.getAttribute("aria-checked") === "true" : x.checked);
+    }
+    if (type === "file") return el.files?.length > 0;
+    if (el.tagName === "BUTTON" || role === "button" || role === "combobox") {
+      const selected = el.querySelector?.('[aria-selected="true"]');
+      const semantic = String(el.getAttribute("aria-valuetext") || el.getAttribute("data-value") || el.value || selected?.textContent || "").trim();
+      if (semantic && !/^(select|choose|--|please|search)$/i.test(semantic)) return true;
       const shown = (el.textContent || "").trim();
-      return Boolean(shown) && !/^(select|choose|--|please|search)/i.test(shown);
+      // A button's full text may include the question label, so only accept it
+      // when it contains a clearly non-placeholder selected value.
+      return Boolean(shown) && !/^(select|choose|--|please|search)(?:\s|$)/i.test(shown) && !/\b(select|choose|please select|please choose)\b/i.test(shown);
     }
     if (el.tagName === "SELECT") {
       const opt = el.options[el.selectedIndex];
       return Boolean(opt?.value) && !/^(select|choose|--|please)/i.test(opt.textContent || "");
     }
-    return Boolean(el.value?.trim());
+    return Boolean(String(el.value ?? "").trim());
   }
 
 
@@ -912,10 +930,11 @@
       fire(cb, "input", "change");
     };
 
-    if (group.length === 1 && !wants.includes("yes")) {
-      const shouldCheck = !/^(no|false|unchecked|0|none)$/i.test(String(answer).trim());
+    if (group.length === 1) {
+      const rawAnswer = String(answer).trim();
+      const shouldCheck = !/^(no|false|unchecked|not selected|0|none)$/i.test(rawAnswer);
       setChecked(el, shouldCheck);
-      return true;
+      return checked(el) === shouldCheck;
     }
 
     let matched = 0;

@@ -19,7 +19,7 @@ export const GET = handler(async (req: NextRequest) => {
 
   const [profiles, responses] = await Promise.all([
     Profile.find({ userId: user._id }).sort({ isDefault: -1 }).lean(),
-    SavedResponse.find({ userId: user._id }).select("question normalizedKey answer inputType options").lean(),
+    SavedResponse.find({ userId: user._id }).select("question normalizedKey aliases category answer inputType options").lean(),
   ]);
 
   return ok({

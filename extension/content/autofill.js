@@ -52,10 +52,12 @@
 
   chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
     if (msg?.type === "ZAPPLY_RUN") {
+      relayToChildFrames("ZAPPLY_RUN");
       run({ manual: true }).then((r) => respond(r));
       return true;
     }
     if (msg?.type === "ZAPPLY_STOP") {
+      relayToChildFrames("ZAPPLY_STOP");
       state.stopRequested = true;
       state.manualSessionActive = false;
       return respond({ ok: true });
@@ -187,6 +189,16 @@
       } catch {}
     });
 
+    // Repeated experience/education sections need the nth profile entry rather
+    // than always copying the latest role/degree into every row.
+    const occurrences = new Map();
+    for (const field of fields) {
+      const key = field.rule?.key;
+      if (!key) { field.index = 0; continue; }
+      const index = occurrences.get(key) || 0;
+      field.index = index;
+      occurrences.set(key, index + 1);
+    }
     return fields;
   }
 
@@ -281,6 +293,7 @@
 
 
   async function fillAndVerify(field, value, rule) {
+    field.el.__zapplyProgrammatic = true;
     const quirks = state.adapter?.quirks ?? {};
     let ok = false;
     const apply = async () => {
@@ -303,7 +316,9 @@
       ok = await apply();
       await sleep(140);
     }
-    return ok && verifyField(field, value);
+    const verified = ok && verifyField(field, value);
+    setTimeout(() => { field.el.__zapplyProgrammatic = false; }, 0);
+    return verified;
   }
 
   function collectRequiredErrors() {
@@ -316,15 +331,16 @@
     }).map(n => (n.textContent || "").trim()).slice(0, 30);
   }
 
-  async function fillField(field, profile, settings) {
+  async function fillField(field, profile, settings, force = false) {
     const { el, label, kind } = field;
+    if (el.__zapplyUserEdited || (!force && M.hasValue(el))) return { key: null, status: "skipped", label };
     const quirks = state.adapter?.quirks ?? {};
 
     // 1. Rule-based match against the profile (computed during collection)
     const rule = field.rule ?? M.matchRule(el, label, RULES);
 
     if (rule) {
-      let value = rule.value(profile, el, label);
+      let value = rule.value(profile, el, label, field.index ?? 0);
 
       // Documents are handled specially
       if (value === "__RESUME__" || value === "__COVER_LETTER__") {
@@ -433,7 +449,7 @@
 
     let done = 0;
     for (const field of targets) {
-      const question = field.label.split(" | ")[0];
+      const question = field.label;
       if (field.kind === "select" && field.el.tagName !== "SELECT") {
         try {
           field.el.scrollIntoView?.({ block: "center", behavior: "instant" });
@@ -526,7 +542,7 @@
     for (const field of fields) {
       if (state.stopRequested) break;
       // Never overwrite something the user already typed
-      if (M.hasValue(field.el) && field.kind !== "checkbox") continue;
+      if (M.hasValue(field.el)) continue;
 
       let outcome;
       try {
@@ -564,7 +580,7 @@
 
       for (const field of added) {
         if (state.stopRequested) break;
-        if (M.hasValue(field.el) && field.kind !== "checkbox") continue;
+        if (M.hasValue(field.el)) continue;
         try {
           const outcome = await fillField(field, profile, settings);
           if (outcome.status === "filled") {
@@ -719,7 +735,15 @@
   function readValue(field) {
     const el = field.el;
     if (el.type === "checkbox" || el.getAttribute("role") === "checkbox") {
-      return (el.getAttribute("role") === "checkbox" ? el.getAttribute("aria-checked") === "true" : el.checked) ? "Yes" : "No";
+      const role = el.getAttribute("role");
+      const name = el.getAttribute("name");
+      const group = role === "checkbox"
+        ? (name ? Array.from(document.querySelectorAll(`[role="checkbox"][name="${CSS.escape(name)}"]`)) : Array.from(el.closest("fieldset, [role='group']")?.querySelectorAll('[role="checkbox"]') || [el]))
+        : (name ? Array.from(document.querySelectorAll(`input[type="checkbox"][name="${CSS.escape(name)}"]`)) : [el]);
+      const checked = group.filter((cb) => role === "checkbox" ? cb.getAttribute("aria-checked") === "true" : cb.checked);
+      if (!checked.length) return "No";
+      if (group.length === 1) return "Yes";
+      return checked.map((cb) => M.visibleText(cb.closest("label") || cb.parentElement) || cb.getAttribute("aria-label") || cb.value).filter(Boolean).join(", ");
     }
     if (el.type === "radio" || el.getAttribute("role") === "radio") {
       const custom = el.getAttribute("role") === "radio";
@@ -787,11 +811,16 @@
     field.el.__zapplyWatched = true;
 
     const capture = () => {
+      if (!field.el.__zapplyProgrammatic) {
+        // Once the user edits a field, it becomes user-owned for this session.
+        // Subsequent SPA validation/MutationObserver passes must never replace it.
+        field.el.__zapplyUserEdited = true;
+      }
       const answer = String(readValue(field) ?? "").trim();
       if (!answer) return;
       if (/^(select|choose|please select|--)/i.test(answer)) return;
 
-      const question = field.label.split(" | ")[0];
+      const question = field.label;
       if (question.length < 5 || question.length > 300) return;
 
       queueAnswer({
@@ -957,6 +986,26 @@
     },
   };
 
+  /* Cross-origin iframe support: many enterprise ATSs embed the application
+   * inside a same-page iframe. The content script already runs in all frames;
+   * this relay lets the top frame's toolbar command reach child frames without
+   * needing direct DOM access to a cross-origin document. */
+  function relayToChildFrames(type) {
+    if (window.top !== window) return;
+    document.querySelectorAll("iframe, frame").forEach((frame) => {
+      try { frame.contentWindow?.postMessage({ source: "zapply", type }, "*"); } catch {}
+    });
+  }
+
+  window.addEventListener("message", (event) => {
+    if (event?.data?.source !== "zapply") return;
+    if (event.data.type === "ZAPPLY_RUN" && window.top !== window) run({ manual: true });
+    if (event.data.type === "ZAPPLY_STOP") {
+      state.stopRequested = true;
+      state.manualSessionActive = false;
+    }
+  });
+
   /* ================================================================== */
   /*  Boot                                                               */
   /* ================================================================== */
@@ -1009,7 +1058,7 @@
         clearTimeout(debounce);
         debounce = setTimeout(() => {
           if (state.filling || !state.manualSessionActive || state.stopRequested) return;
-          const fresh = collectFields(state.adapter).filter((f) => !M.hasValue(f.el));
+          const fresh = collectFields(state.adapter).filter((f) => !M.hasValue(f.el) && !f.el.__zapplyUserEdited);
           if (fresh.length >= 3) run({ manual: true });
         }, 1200);
       }).observe(document.body, { childList: true, subtree: true });
@@ -1024,20 +1073,33 @@
   // When Save and Continue triggers ATS validation, automatically repair fields
   // that were visually filled but not committed. This is especially important
   // for Workday's controlled inputs and dropdowns.
+  function fieldHasValidationError(field) {
+    const el = field?.el;
+    if (!el) return false;
+    if (el.getAttribute?.("aria-invalid") === "true") return true;
+    const box = el.closest?.("fieldset, [role='group'], [role='radiogroup'], .field, [class*='field'], [data-automation-id]");
+    if (!box) return false;
+    const text = String(box.textContent || "");
+    return /required|please select|please enter|invalid|must be/i.test(text) && Boolean(box.querySelector?.('[aria-invalid="true"], .error, .field-error, [role="alert"]'));
+  }
+
   let validationRepairTimer = null;
   let validationRepairBusy = false;
   const validationObserver = new MutationObserver(() => {
     if (validationRepairBusy || state.filling || !state.manualSessionActive || state.stopRequested) return;
     const errors = collectRequiredErrors();
     if (!errors.length || !state.profile || !state.allFields.length) return;
+    const unresolved = state.allFields.some((f) => f.kind !== "file" && !f.el.__zapplyUserEdited && (!M.hasValue(f.el) || fieldHasValidationError(f)));
+    if (!unresolved) return;
     clearTimeout(validationRepairTimer);
     validationRepairTimer = setTimeout(async () => {
       if (validationRepairBusy || state.filling || !state.manualSessionActive || state.stopRequested) return;
       validationRepairBusy = true;
       try {
         for (const field of state.allFields) {
-          if (field.kind === 'file' || M.hasValue(field.el)) continue;
-          await fillField(field, state.profile, state.session?.settings || {});
+          if (field.kind === 'file' || field.el.__zapplyUserEdited) continue;
+          if (!M.hasValue(field.el) && !fieldHasValidationError(field)) continue;
+          await fillField(field, state.profile, state.session?.settings || {}, true);
         }
       } finally {
         validationRepairBusy = false;

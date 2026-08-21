@@ -33,8 +33,8 @@
     return null;
   };
 
-  const latestJob = (p) => (p?.experience ?? [])[0] ?? {};
-  const latestSchool = (p) => (p?.education ?? [])[0] ?? {};
+  const latestJob = (p, index = 0) => (p?.experience ?? [])[Math.max(0, Number(index) || 0)] ?? (p?.experience ?? [])[0] ?? {};
+  const latestSchool = (p, index = 0) => (p?.education ?? [])[Math.max(0, Number(index) || 0)] ?? (p?.education ?? [])[0] ?? {};
 
   const datePart = (raw, part) => {
     const value = String(raw ?? "").trim();
@@ -148,7 +148,7 @@
       match: [/\b(nationality|citizenship|citizen(ship)?\s*status)\b/i],
       deny: [/work\s*authorization|sponsor|visa/i],
       type: ["text", "select"],
-      value: (p) => P(p).nationality,
+      value: (p) => P(p).nationality || P(p).citizenship,
     },
 
     /* ---------------- Contact ---------------- */
@@ -285,7 +285,7 @@
       match: [/\b(current|present|most recent|latest)\s*(employer|company|organization)\b/i, /^company$/i, /\bemployer\b/i],
       deny: [/previous|former|why|reason|reference/i],
       type: ["text"],
-      value: (p) => latestJob(p).company,
+      value: (p, _el, _label, index) => latestJob(p, index).company,
     },
     {
       key: "currentTitle",
@@ -293,7 +293,7 @@
       match: [/\b(current|present|most recent|latest)\s*(job\s*)?title\b/i, /\byour\s*(job\s*)?title\b/i, /^job\s*title$/i, /\bposition\s*title\b/i],
       deny: [/desired|applying|role you|reference/i],
       type: ["text"],
-      value: (p) => latestJob(p).title,
+      value: (p, _el, _label, index) => latestJob(p, index).title,
     },
     {
       key: "employmentType",
@@ -301,7 +301,7 @@
       match: [/\bemployment\s*(type|status)\b/i, /\bjob\s*(type|status)\b/i, /\bwork\s*(type|status)\b/i],
       deny: [/current|previous|eligibility|authorized/i],
       type: ["text", "select", "radio"],
-      value: (p) => latestJob(p).employmentType,
+      value: (p, _el, _label, index) => latestJob(p, index).employmentType,
     },
     {
       key: "experienceLocation",
@@ -311,7 +311,7 @@
         /\blocation\b.*\b(experience|employment|work\s*history|job\s*history)\b/i,
       ],
       type: ["text", "select"],
-      value: (p) => latestJob(p).location,
+      value: (p, _el, _label, index) => latestJob(p, index).location,
     },
     {
       key: "experienceLocationType",
@@ -321,7 +321,7 @@
         /\b(remote|hybrid|on[- ]site)\b.*\b(work|employment|location)\b/i,
       ],
       type: ["text", "select", "radio"],
-      value: (p) => latestJob(p).locationType,
+      value: (p, _el, _label, index) => latestJob(p, index).locationType,
       options: {
         "On-site": ["on-site", "onsite", "office"],
         Remote: ["remote", "work from home", "wfh"],
@@ -334,7 +334,7 @@
       match: [/\b(responsibilit(?:y|ies)|what\s+you\s+did|duties|job\s+duties)\b/i],
       deny: [/reference|emergency/i],
       type: ["text", "textarea"],
-      value: (p) => latestJob(p).description,
+      value: (p, _el, _label, index) => latestJob(p, index).description,
     },
     {
       key: "experienceStartDate",
@@ -344,7 +344,7 @@
         /\bstart\b.*\b(experience|employment|work\s*history|job\s*history)\b/i,
       ],
       type: ["text", "date", "month"],
-      value: (p, el) => dateForField(latestJob(p).startDate, el),
+      value: (p, el, _label, index) => dateForField(latestJob(p, index).startDate, el),
     },
     {
       key: "experienceEndDate",
@@ -354,7 +354,7 @@
         /\bend\b.*\b(experience|employment|work\s*history|job\s*history)\b/i,
       ],
       type: ["text", "date", "month"],
-      value: (p, el) => dateForField(latestJob(p).endDate, el),
+      value: (p, el, _label, index) => dateForField(latestJob(p, index).endDate, el),
     },
     {
       key: "experienceStartMonth",
@@ -362,7 +362,7 @@
       match: [/\bstart\s*date\s*month\b/i, /\bstart\s*month\b/i],
       deny: [/education|school|college|university/i],
       type: ["select", "text"],
-      value: (p) => dateMonth(latestJob(p).startDate),
+      value: (p, _el, _label, index) => dateMonth(latestJob(p, index).startDate),
     },
     {
       key: "experienceStartYear",
@@ -370,7 +370,7 @@
       match: [/\bstart\s*date\s*year\b/i, /\bstart\s*year\b/i],
       deny: [/education|school|college|university/i],
       type: ["select", "text"],
-      value: (p) => dateYear(latestJob(p).startDate),
+      value: (p, _el, _label, index) => dateYear(latestJob(p, index).startDate),
     },
     {
       key: "experienceEndMonth",
@@ -378,7 +378,7 @@
       match: [/\bend\s*date\s*month\b/i, /\bend\s*month\b/i],
       deny: [/education|school|college|university/i],
       type: ["select", "text"],
-      value: (p) => dateMonth(latestJob(p).endDate),
+      value: (p, _el, _label, index) => dateMonth(latestJob(p, index).endDate),
     },
     {
       key: "experienceEndYear",
@@ -386,14 +386,14 @@
       match: [/\bend\s*date\s*year\b/i, /\bend\s*year\b/i],
       deny: [/education|school|college|university/i],
       type: ["select", "text"],
-      value: (p) => dateYear(latestJob(p).endDate),
+      value: (p, _el, _label, index) => dateYear(latestJob(p, index).endDate),
     },
     {
       key: "currentJob",
       weight: 12,
       match: [/\bcurrently\s*(work|employed)\b/i, /\bcurrent\s*(job|role|position)\b/i, /\bthis\s*is\s*my\s*current\s*(job|role)\b/i],
       type: ["checkbox", "radio", "select"],
-      value: (p) => latestJob(p).current ? "Yes" : "No",
+      value: (p, _el, _label, index) => latestJob(p, index).current ? "Yes" : "No",
       options: { Yes: ["yes", "currently", "current", "true"], No: ["no", "not current", "false"] },
     },
     {
@@ -411,7 +411,7 @@
       match: [/\b(school|university|college|institution)\b/i],
       deny: [/high\s*school\s*only|graduated\b.*\?/i],
       type: ["text", "select"],
-      value: (p) => latestSchool(p).school,
+      value: (p, _el, _label, index) => latestSchool(p, index).school,
     },
     {
       key: "degree",
@@ -419,35 +419,35 @@
       match: [/\bdegree\b/i, /\beducation\s*level\b/i, /\bhighest\s*(level\s*of\s*)?education\b/i],
       deny: [/field|major|subject|date/i],
       type: ["text", "select", "radio"],
-      value: (p) => latestSchool(p).degree,
+      value: (p, _el, _label, index) => latestSchool(p, index).degree,
     },
     {
       key: "fieldOfStudy",
       weight: 11,
       match: [/\b(field\s*of\s*study|major|discipline|concentration|area\s*of\s*study)\b/i],
       type: ["text", "select"],
-      value: (p) => latestSchool(p).fieldOfStudy,
+      value: (p, _el, _label, index) => latestSchool(p, index).fieldOfStudy,
     },
     {
       key: "educationLocation",
       weight: 8,
       match: [/\b(school|college|university|education)\b.*\blocation\b/i, /\blocation\b.*\b(school|college|university)\b/i],
       type: ["text", "select"],
-      value: (p) => latestSchool(p).location,
+      value: (p, _el, _label, index) => latestSchool(p, index).location,
     },
     {
       key: "gpa",
       weight: 11,
       match: [/\bgpa\b/i, /\bgrade\s*point\b/i],
       type: ["text", "number"],
-      value: (p) => latestSchool(p).gpa,
+      value: (p, _el, _label, index) => latestSchool(p, index).gpa,
     },
     {
       key: "graduationDate",
       weight: 9,
       match: [/\b(graduation|grad)\s*(date|year|month)\b/i, /\b(expected|anticipated)\s*graduation\b/i],
       type: ["text", "date", "month", "select"],
-      value: (p, el) => dateForField(latestSchool(p).endDate, el),
+      value: (p, el, _label, index) => dateForField(latestSchool(p, index).endDate, el),
     },
     {
       key: "educationStartMonth",
@@ -457,7 +457,7 @@
         /\b(start|begin)\w*\s*date\s*month\b.*\b(education|school|college|university)\b/i,
       ],
       type: ["select", "text"],
-      value: (p) => dateMonth(latestSchool(p).startDate),
+      value: (p, _el, _label, index) => dateMonth(latestSchool(p, index).startDate),
     },
     {
       key: "educationStartYear",
@@ -467,7 +467,7 @@
         /\b(start|begin)\w*\s*date\s*year\b.*\b(education|school|college|university)\b/i,
       ],
       type: ["select", "text"],
-      value: (p) => dateYear(latestSchool(p).startDate),
+      value: (p, _el, _label, index) => dateYear(latestSchool(p, index).startDate),
     },
     {
       key: "educationEndMonth",
@@ -478,7 +478,7 @@
         /\bend\s*\(?(or\s+expected)?\)?\s*date\s*month\b.*\b(education|school|college|university)\b/i,
       ],
       type: ["select", "text"],
-      value: (p) => dateMonth(latestSchool(p).endDate),
+      value: (p, _el, _label, index) => dateMonth(latestSchool(p, index).endDate),
     },
     {
       key: "educationEndYear",
@@ -489,7 +489,7 @@
         /\bend\s*\(?(or\s+expected)?\)?\s*date\s*year\b.*\b(education|school|college|university)\b/i,
       ],
       type: ["select", "text"],
-      value: (p) => dateYear(latestSchool(p).endDate),
+      value: (p, _el, _label, index) => dateYear(latestSchool(p, index).endDate),
     },
 
     /* ---------------- Work eligibility ---------------- */
