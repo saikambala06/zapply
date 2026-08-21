@@ -38,6 +38,14 @@
       if (c && !parts.includes(c)) parts.push(c);
     };
 
+    // Group question for radio/checkbox controls. Keep it before the option
+    // label so AI and rule matching see the actual question as well as the choice.
+    if (el.type === "radio" || el.type === "checkbox") {
+      const fs = el.closest("fieldset");
+      const legend = fs?.querySelector("legend");
+      if (legend && !legend.contains(el)) push(visibleText(legend));
+    }
+
     // 1. <label for="id">
     if (el.id) {
       const escaped = (window.CSS && CSS.escape) ? CSS.escape(el.id) : el.id.replace(/["\\]/g, "\\$&");
@@ -111,6 +119,8 @@
     const tag = el.tagName.toLowerCase();
     if (tag === "textarea") return "textarea";
     if (tag === "select") return "select";
+    if (el.getAttribute("role") === "checkbox") return "checkbox";
+    if (el.getAttribute("role") === "radio") return "radio";
     if (
       el.getAttribute("role") === "combobox" ||
       el.getAttribute("aria-haspopup") === "listbox" ||
@@ -257,9 +267,16 @@
   function setRadioValue(el, value, synonyms) {
     if (!value) return false;
     const name = el.getAttribute("name");
-    const group = name
-      ? Array.from(document.querySelectorAll(`input[type="radio"][name="${CSS.escape(name)}"]`))
-      : [el];
+    let group;
+    if (el.getAttribute("role") === "radio") {
+      group = name
+        ? Array.from(document.querySelectorAll(`[role="radio"][name="${CSS.escape(name)}"]`))
+        : Array.from(el.closest('fieldset, [role="radiogroup"]')?.querySelectorAll('[role="radio"]') || [el]);
+    } else {
+      group = name
+        ? Array.from(document.querySelectorAll(`input[type="radio"][name="${CSS.escape(name)}"]`))
+        : [el];
+    }
 
     const want = norm(value);
     const accepted = synonyms?.[value]?.map(norm) ?? [want];
@@ -279,9 +296,16 @@
     });
 
     if (!best || bestScore < 45) return false;
-    best.checked = true;
-    best.click?.();
+    if (best.getAttribute("role") === "radio") {
+      best.click?.();
+      best.setAttribute("aria-checked", "true");
+      group.forEach((r) => { if (r !== best) r.setAttribute("aria-checked", "false"); });
+    } else {
+      best.checked = true;
+      best.click?.();
+    }
     fire(best, "input", "change");
+    fire(best, "change");
     return true;
   }
 
@@ -329,7 +353,7 @@
    * did nothing at all. Now we open first, type only if it accepts text, and
    * poll for the menu instead of assuming it appeared within 260ms.
    */
-  async function setComboboxValue(el, value, waitMs = 1200) {
+  async function setComboboxValue(el, value, waitMs = 1200, synonyms) {
     if (!value) return false;
     const want = norm(value);
 
@@ -367,6 +391,13 @@
       else if (text.startsWith(want)) s = 82;
       else if (text.includes(want)) s = 66;
       else if (want.includes(text) && text.length > 2) s = 58;
+      else {
+        const accepted = synonyms?.[value]?.map(norm) ?? [];
+        for (const a of accepted) {
+          if (text === a) s = Math.max(s, 96);
+          else if (text.includes(a) || a.includes(text)) s = Math.max(s, 78);
+        }
+      }
       if (s > bestScore) { bestScore = s; best = opt; }
     });
 
@@ -549,6 +580,9 @@
   }
 
   function hasValue(el) {
+    if (el.getAttribute("role") === "checkbox" || el.getAttribute("role") === "radio") {
+      return el.getAttribute("aria-checked") === "true";
+    }
     if (el.type === "checkbox" || el.type === "radio") return el.checked;
     if (el.type === "file") return el.files?.length > 0;
     if (el.tagName === "BUTTON" || el.getAttribute("role") === "button") {
@@ -562,6 +596,90 @@
     return Boolean(el.value?.trim());
   }
 
+
+  /**
+   * Select one or more checkboxes in a group. `answer` may be a boolean,
+   * a canonical string, a comma/newline separated list, or an array.
+   * Matching is based on the visible option label/value, not the DOM value
+   * alone, so "United States" can match "United States of America".
+   */
+  function setCheckboxValue(el, answer, synonyms) {
+    if (answer === undefined || answer === null || answer === "") return false;
+
+    const isCustom = el.getAttribute("role") === "checkbox";
+    const name = el.getAttribute("name");
+    const customContainer = el.closest("fieldset, [role='group']");
+    const group = isCustom
+      ? (name
+          ? Array.from(document.querySelectorAll(`[role="checkbox"][name="${CSS.escape(name)}"]`))
+          : Array.from(customContainer?.querySelectorAll('[role="checkbox"]') || [el]))
+      : (name
+          ? Array.from(document.querySelectorAll(`input[type="checkbox"][name="${CSS.escape(name)}"]`))
+          : [el]);
+
+    let wants;
+    if (Array.isArray(answer)) {
+      wants = answer.map(norm).filter(Boolean);
+    } else {
+      const raw = String(answer).trim();
+      if (/^(yes|true|checked|selected|1)$/i.test(raw)) wants = ["yes"];
+      else if (/^(no|false|unchecked|not selected|0|none)$/i.test(raw)) wants = [];
+      else wants = raw.split(/\s*(?:,|;|\n|\|)\s*/).map(norm).filter(Boolean);
+    }
+
+    const checked = (cb) =>
+      cb.getAttribute("role") === "checkbox"
+        ? cb.getAttribute("aria-checked") === "true"
+        : Boolean(cb.checked);
+
+    const setChecked = (cb, shouldCheck) => {
+      if (checked(cb) !== shouldCheck) cb.click?.();
+      if (cb.getAttribute("role") === "checkbox") cb.setAttribute("aria-checked", String(shouldCheck));
+      fire(cb, "input", "change");
+    };
+
+    if (group.length === 1 && !wants.includes("yes")) {
+      const shouldCheck = !/^(no|false|unchecked|0|none)$/i.test(String(answer).trim());
+      setChecked(el, shouldCheck);
+      return true;
+    }
+
+    for (const cb of group) {
+      const label = norm(`${deriveLabel(cb)} ${cb.value || ""}`);
+      const shouldCheck = wants.some((want) => {
+        if (want === "yes") return true;
+        const accepted = synonyms?.[want]?.map(norm) ?? [want];
+        return accepted.some((x) => x && (label === x || label.includes(x) || x.includes(label)));
+      });
+      setChecked(cb, shouldCheck);
+    }
+    return true;
+  }
+
+  /** Reads the visible choices for native/custom controls. */
+  function optionTextsFor(el) {
+    if (!el) return [];
+    if (el.tagName === "SELECT") {
+      return Array.from(el.options || [])
+        .map((o) => (o.textContent || "").trim())
+        .filter(Boolean)
+        .slice(0, 50);
+    }
+    if (el.type === "radio" || el.type === "checkbox") {
+      const name = el.getAttribute("name");
+      const group = name
+        ? Array.from(document.querySelectorAll(`input[type="${el.type}"][name="${CSS.escape(name)}"]`))
+        : [el];
+      return group
+        .map((x) => visibleText(x.closest("label") || x.parentElement) || x.value)
+        .map((x) => x.trim())
+        .filter(Boolean)
+        .slice(0, 50);
+    }
+    const described = visibleOptions();
+    return described.map((x) => (x.textContent || "").trim()).filter(Boolean).slice(0, 50);
+  }
+
   global.ZAPPLY_MATCHER = {
     deriveLabel,
     humanize,
@@ -570,9 +688,11 @@
     setTextValue,
     setSelectValue,
     setRadioValue,
+    setCheckboxValue,
     setComboboxValue,
     visibleOptions,
     waitForOptions,
+    optionTextsFor,
     setFileValue,
     isFillable,
     hasValue,

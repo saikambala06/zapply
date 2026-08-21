@@ -115,7 +115,8 @@
           // Custom dropdowns that aren't <select>: Workday renders these as
           // buttons, so scanning only form elements missed every one of them.
           '[aria-haspopup="listbox"], [aria-haspopup="menu"], ' +
-          'button[data-automation-id*="Dropdown"], div[role="button"][aria-expanded]'
+          'button[data-automation-id*="Dropdown"], div[role="button"][aria-expanded], ' +
+          '[role="checkbox"], [role="radio"]'
         )
         .forEach((el) => {
           if (seen.has(el)) return;
@@ -131,10 +132,21 @@
             if (!opensMenu) return;
           } else if (el.type === "button") return;
 
-          // Only fill one radio per group
-          if (el.type === "radio") {
+          // Only one representative is needed for grouped radios/checkboxes:
+          // the handler fills the entire native/custom group.
+          if (el.type === "radio" || el.type === "checkbox" ||
+              el.getAttribute("role") === "radio" || el.getAttribute("role") === "checkbox") {
+            const role = el.getAttribute("role") || el.type;
             const name = el.getAttribute("name");
-            if (name && fields.some((f) => f.el.type === "radio" && f.el.getAttribute("name") === name)) return;
+            const container = el.closest("fieldset, [role='radiogroup'], [role='group']");
+            if (container && !container.dataset.zapplyGroupKey) {
+              container.dataset.zapplyGroupKey = `g${Math.random().toString(36).slice(2)}`;
+            }
+            const groupKey = `${role}|${name || container?.dataset?.zapplyGroupKey || `single-${fields.length}`}`;
+            if (fields.some((f) => f._groupKey === groupKey && f.el !== el)) return;
+            el.dataset.zapplyGroup = el.dataset.zapplyGroup || (name || container?.dataset?.zapplyGroupKey || `g${fields.length}`);
+            fields.push({ el, label: M.deriveLabel(el), kind: M.fieldKind(el), rule: M.matchRule(el, M.deriveLabel(el), RULES), _groupKey: groupKey });
+            return;
           }
 
           const label = M.deriveLabel(el);
@@ -192,14 +204,12 @@
         if (el.tagName === "SELECT") {
           done = M.setSelectValue(el, value, rule.options);
         } else {
-          done = await M.setComboboxValue(el, value, quirks.dropdownDelay ?? 260);
+          done = await M.setComboboxValue(el, value, quirks.dropdownDelay ?? 260, rule.options);
         }
       } else if (kind === "radio") {
         done = M.setRadioValue(el, value, rule.options);
       } else if (kind === "checkbox") {
-        const wantChecked = /^(yes|true|1)$/i.test(String(value));
-        if (el.checked !== wantChecked) { el.click(); }
-        done = true;
+        done = M.setCheckboxValue(el, value, rule.options);
       } else if (kind === "file") {
         done = false;
       } else {
@@ -221,9 +231,7 @@
         } else if (kind === "radio") {
           done = M.setRadioValue(el, saved.answer);
         } else if (kind === "checkbox") {
-          const want = /^(yes|true|1)$/i.test(saved.answer);
-          if (el.checked !== want) el.click();
-          done = true;
+          done = M.setCheckboxValue(el, saved.answer);
         } else if (kind !== "file") {
           done = M.setTextValue(el, saved.answer);
         }
@@ -274,7 +282,7 @@
         const q = f.label.split(" | ")[0];
         if (q.length < 8) return false;
         // Choice fields are cheap and high-value: always worth asking.
-        if (f.kind === "select" || f.kind === "radio") return true;
+        if (f.kind === "select" || f.kind === "radio" || f.kind === "checkbox") return true;
         return /\?|describe|why|what|how|tell us|explain|which|when|do you|are you|have you/i.test(q);
       })
       .slice(0, 8);
@@ -290,6 +298,13 @@
     let done = 0;
     for (const field of targets) {
       const question = field.label.split(" | ")[0];
+      if (field.kind === "select" && field.el.tagName !== "SELECT") {
+        try {
+          field.el.scrollIntoView?.({ block: "center", behavior: "instant" });
+          field.el.click?.();
+          await M.waitForOptions(state.adapter?.quirks?.dropdownDelay ?? 800);
+        } catch { /* continue with whatever options are available */ }
+      }
       const options = optionsFor(field);
 
       const res = await send({
@@ -302,24 +317,30 @@
           jobDescription: meta.description?.slice(0, 3000),
           profileId: state.profile?._id,
           maxWords: field.kind === "textarea" ? 130 : 40,
+          fieldType: field.kind,
+          multiple: field.kind === "checkbox" && options.length > 1,
         },
       });
       if (!res?.ok || !res.data?.answer) continue;
 
-      const answer = String(res.data.answer).trim();
+      let answer = res.data.answer;
       let ok = false;
 
       if (field.kind === "select") {
+        answer = String(answer).trim();
         ok = field.el.tagName === "SELECT"
           ? M.setSelectValue(field.el, answer)
           : await M.setComboboxValue(field.el, answer);
       } else if (field.kind === "radio") {
+        answer = String(answer).trim();
         ok = M.setRadioValue(field.el, answer);
       } else if (field.kind === "checkbox") {
-        const want = /^(yes|true|1)$/i.test(answer);
-        if (field.el.checked !== want) field.el.click();
-        ok = true;
+        if (typeof answer === "string") {
+          try { answer = JSON.parse(answer); } catch { /* string fallback */ }
+        }
+        ok = M.setCheckboxValue(field.el, answer);
       } else {
+        answer = String(answer).trim();
         ok = M.setTextValue(field.el, answer);
       }
 
@@ -474,14 +495,21 @@
   /** Reads whatever the user has put in a field, in a comparable form. */
   function readValue(field) {
     const el = field.el;
-    if (el.type === "checkbox") return el.checked ? "Yes" : "No";
-    if (el.type === "radio") {
+    if (el.type === "checkbox" || el.getAttribute("role") === "checkbox") {
+      return (el.getAttribute("role") === "checkbox" ? el.getAttribute("aria-checked") === "true" : el.checked) ? "Yes" : "No";
+    }
+    if (el.type === "radio" || el.getAttribute("role") === "radio") {
+      const custom = el.getAttribute("role") === "radio";
       const name = el.getAttribute("name");
-      const group = name
-        ? Array.from(document.querySelectorAll(`input[type="radio"][name="${CSS.escape(name)}"]`))
-        : [el];
-      const picked = group.find((r) => r.checked);
-      return picked ? M.visibleText(picked.closest("label") || picked.parentElement) || picked.value : "";
+      const group = custom
+        ? (name
+            ? Array.from(document.querySelectorAll(`[role="radio"][name="${CSS.escape(name)}"]`))
+            : Array.from(el.closest("fieldset, [role='radiogroup']")?.querySelectorAll('[role="radio"]') || [el]))
+        : (name
+            ? Array.from(document.querySelectorAll(`input[type="radio"][name="${CSS.escape(name)}"]`))
+            : [el]);
+      const picked = group.find((r) => custom ? r.getAttribute("aria-checked") === "true" : r.checked);
+      return picked ? M.visibleText(picked.closest("label") || picked.parentElement) || picked.getAttribute("aria-label") || picked.value : "";
     }
     if (el.tagName === "SELECT") {
       const opt = el.options[el.selectedIndex];
@@ -496,15 +524,37 @@
   function optionsFor(field) {
     const el = field.el;
     if (el.tagName === "SELECT") {
-      return Array.from(el.options).map((o) => (o.textContent || "").trim()).filter(Boolean).slice(0, 25);
-    }
-    if (el.type === "radio") {
-      const name = el.getAttribute("name");
-      if (!name) return [];
-      return Array.from(document.querySelectorAll(`input[type="radio"][name="${CSS.escape(name)}"]`))
-        .map((r) => M.visibleText(r.closest("label") || r.parentElement) || r.value)
+      return Array.from(el.options || [])
+        .map((o) => (o.textContent || "").trim())
         .filter(Boolean)
-        .slice(0, 25);
+        .slice(0, 50);
+    }
+    if (el.type === "radio" || el.type === "checkbox" ||
+        el.getAttribute("role") === "radio" || el.getAttribute("role") === "checkbox") {
+      const role = el.getAttribute("role");
+      const type = el.type;
+      const name = el.getAttribute("name");
+      let group;
+      if (role === "radio" || role === "checkbox") {
+        group = name
+          ? Array.from(document.querySelectorAll(`[role="${role}"][name="${CSS.escape(name)}"]`))
+          : Array.from(el.closest(`fieldset, [role="${role === "radio" ? "radiogroup" : "group"}"]`)?.querySelectorAll(`[role="${role}"]`) || [el]);
+      } else {
+        group = name
+          ? Array.from(document.querySelectorAll(`input[type="${type}"][name="${CSS.escape(name)}"]`))
+          : [el];
+      }
+      return group
+        .map((x) => M.visibleText(x.closest("label") || x.parentElement) || x.getAttribute("aria-label") || x.value)
+        .map((x) => String(x).trim())
+        .filter(Boolean)
+        .slice(0, 50);
+    }
+    if (field.kind === "select") {
+      return M.visibleOptions()
+        .map((x) => (x.textContent || "").trim())
+        .filter(Boolean)
+        .slice(0, 50);
     }
     return [];
   }
