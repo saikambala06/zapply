@@ -157,3 +157,8 @@ body {
 }
 .link:hover { color: var(--brand); text-decoration: underline; }
 .link--danger:hover { color: var(--danger); }
+
+.fill-actions { display: grid; grid-template-columns: 1fr 82px; gap: 8px; }
+.btn--danger { background: #e5484d; color: #fff; border-color: #e5484d; }
+.btn--danger:hover:not(:disabled) { background: #c62a2f; }
+.btn[hidden] { display: none; }

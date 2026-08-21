@@ -2,7 +2,7 @@ import mongoose, { Schema, model, models } from "mongoose";
 
 const SettingsSchema = new Schema(
   {
-    autofillOnLoad: { type: Boolean, default: true },     // fill as soon as a form is detected
+    autofillOnLoad: { type: Boolean, default: false },     // fill as soon as a form is detected
     autoPilot: { type: Boolean, default: false },          // fill + advance + submit
     showOverlay: { type: Boolean, default: true },         // the status pill on the page
     trackAutomatically: { type: Boolean, default: true },  // log applications on submit

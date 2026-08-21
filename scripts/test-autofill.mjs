@@ -199,6 +199,27 @@ document.querySelectorAll("input, select, textarea").forEach((el) => {
   });
 });
 
+
+// Exact iCIMS-style protected-veteran radio test: the profile answer must
+// select "I am not a protected veteran", never the first option.
+const veteranBox = document.createElement("fieldset");
+veteranBox.innerHTML = `
+  <legend>Please indicate your protected veteran status</legend>
+  <label><input type="radio" name="veteran_radio" value="protected"> I IDENTIFY AS ONE OR MORE OF THE CLASSIFICATIONS OF PROTECTED VETERAN</label>
+  <label><input type="radio" name="veteran_radio" value="not-protected"> I AM NOT A PROTECTED VETERAN</label>
+  <label><input type="radio" name="veteran_radio" value="decline"> I DON'T WISH TO ANSWER</label>`;
+document.body.appendChild(veteranBox);
+const veteranRadio = veteranBox.querySelector('input[type="radio"]');
+const veteranOk = M.setRadioValue(veteranRadio, PROFILE.eeo.veteranStatus, {
+  "I am not a protected veteran": ["i am not a protected veteran", "not protected veteran"]
+});
+const pickedVeteran = Array.from(veteranBox.querySelectorAll('input[type="radio"]')).find((r) => r.checked);
+if (!veteranOk || pickedVeteran?.value !== "not-protected") {
+  console.error("\u001b[31mProtected-veteran radio test FAILED.\u001b[0m", { veteranOk, picked: pickedVeteran?.value });
+  process.exit(1);
+}
+console.log("\u001b[32mProtected-veteran radio test passed.\u001b[0m\n");
+
 /* ---- report ---- */
 const pad = (s, n) => String(s ?? "").padEnd(n).slice(0, n);
 console.log("\n" + pad("FIELD", 14) + pad("QUESTION", 42) + pad("RULE", 20) + "VALUE");

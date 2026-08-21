@@ -30,6 +30,8 @@
     drafted: new Set(), // elements filled by AI — the user must review these
     duplicate: null,    // a prior application for this posting, if any
     allFields: [],      // everything scanned on the last run
+    stopRequested: false,
+    manualSessionActive: false,
   };
 
   /* ================================================================== */
@@ -52,6 +54,11 @@
     if (msg?.type === "ZAPPLY_RUN") {
       run({ manual: true }).then((r) => respond(r));
       return true;
+    }
+    if (msg?.type === "ZAPPLY_STOP") {
+      state.stopRequested = true;
+      state.manualSessionActive = false;
+      return respond({ ok: true });
     }
     if (msg?.type === "ZAPPLY_STATUS") {
       respond({
@@ -406,7 +413,12 @@
   }
 
   async function run({ manual = false } = {}) {
+    // Autofill is deliberately manual. The page may detect an application, but
+    // it must never mutate the form until the user explicitly starts it.
+    if (!manual) return { ok: false, error: "manual-start-required" };
     if (state.filling) return { ok: false, error: "Already filling." };
+    state.stopRequested = false;
+    state.manualSessionActive = true;
 
     const session = state.session ?? (await loadSession());
     if (!session?.profile) {
@@ -443,6 +455,7 @@
     }
 
     for (const field of fields) {
+      if (state.stopRequested) break;
       // Never overwrite something the user already typed
       if (M.hasValue(field.el) && field.kind !== "checkbox") continue;
 
@@ -480,6 +493,18 @@
       result.unmatched = state.unmatched.length;
     }
 
+    if (state.stopRequested) {
+      result.stopped = true;
+      result.unmatched = state.unmatched.length;
+      result.durationMs = Math.round(performance.now() - started);
+      result.profileLabel = profile?.label ?? null;
+      result.matchScore = state.scoring?.score ?? null;
+      state.lastRun = result;
+      state.filling = false;
+      overlay.show({ tone: "warn", title: `Stopped — ${result.filled} fields filled`, body: "Autofill stopped. You can review the form and start again when ready." });
+      return { ok: true, data: result };
+    }
+
     // Premium: draft the open-ended questions that are left.
     result.drafted = await answerRemaining(session, meta, settings);
     if (result.drafted) {
@@ -492,6 +517,7 @@
     // Retry every unresolved field once before reading validation errors.
     await sleep(250);
     for (const field of fields) {
+      if (state.stopRequested) break;
       if (field.kind === 'file') continue;
       if (M.hasValue(field.el)) continue;
       try {
@@ -548,7 +574,7 @@
       });
     }
 
-    if (settings.autoPilot && adapter.nextButton) await advance(adapter);
+    if (!state.stopRequested && settings.autoPilot && adapter.nextButton) await advance(adapter);
 
     return { ok: true, data: result };
   }
@@ -761,12 +787,13 @@
 
   /** Auto Pilot: click through to the next step and re-run on the new fields. */
   async function advance(adapter) {
+    if (state.stopRequested || !state.manualSessionActive) return;
     const next = document.querySelector(adapter.nextButton);
     if (!next || next.disabled) return;
     next.click();
     await sleep(1400);
     state.filling = false;
-    await run({ manual: false });
+    if (!state.stopRequested && state.manualSessionActive) await run({ manual: true });
   }
 
   /* ================================================================== */
@@ -794,8 +821,16 @@
           <span class="zapply-pill__title"></span>
           <span class="zapply-pill__body"></span>
         </span>
+        <button class="zapply-pill__stop" type="button">Stop</button>
         <button class="zapply-pill__close" aria-label="Dismiss">&times;</button>`;
       el.querySelector(".zapply-pill__close").addEventListener("click", () => this.hide());
+      el.querySelector(".zapply-pill__stop").addEventListener("click", async () => {
+        state.stopRequested = true;
+        state.manualSessionActive = false;
+        await send({ type: "ZAPPLY_STOP" });
+        el.querySelector(".zapply-pill__stop").disabled = true;
+        el.querySelector(".zapply-pill__stop").textContent = "Stopping…";
+      });
       (document.body || document.documentElement).appendChild(el);
       this.node = el;
       return el;
@@ -805,6 +840,10 @@
       el.dataset.tone = tone;
       el.querySelector(".zapply-pill__title").textContent = title;
       el.querySelector(".zapply-pill__body").textContent = body ?? "";
+      const stop = el.querySelector(".zapply-pill__stop");
+      stop.disabled = !state.filling;
+      stop.textContent = "Stop";
+      stop.hidden = !state.filling;
       el.classList.add("zapply-pill--visible");
       clearTimeout(this.timer);
       if (autoHide) this.timer = setTimeout(() => this.hide(), 4500);
@@ -855,21 +894,19 @@
       return; // manual fill still works via the popup
     }
 
-    if (session.settings?.autofillOnLoad !== false) {
-      // Give SPA forms a moment to mount
-      await sleep(900);
-      await run({ manual: false });
-    }
+    // IMPORTANT: detection is passive. Never fill automatically on page load.
+    // The user must click "Fill this application" in the extension.
 
-    // Multi-step forms swap the fields under us; re-run when a big change lands.
+    // Multi-step forms swap the fields under us; only re-run while a user-started
+    // fill session is active. This prevents SPA mutations from starting autofill.
     if (state.adapter?.quirks?.multiStep) {
       let debounce;
       new MutationObserver(() => {
         clearTimeout(debounce);
         debounce = setTimeout(() => {
-          if (state.filling) return;
+          if (state.filling || !state.manualSessionActive || state.stopRequested) return;
           const fresh = collectFields(state.adapter).filter((f) => !M.hasValue(f.el));
-          if (fresh.length >= 3) run({ manual: false });
+          if (fresh.length >= 3) run({ manual: true });
         }, 1200);
       }).observe(document.body, { childList: true, subtree: true });
     }
@@ -886,12 +923,12 @@
   let validationRepairTimer = null;
   let validationRepairBusy = false;
   const validationObserver = new MutationObserver(() => {
-    if (validationRepairBusy || state.filling) return;
+    if (validationRepairBusy || state.filling || !state.manualSessionActive || state.stopRequested) return;
     const errors = collectRequiredErrors();
     if (!errors.length || !state.profile || !state.allFields.length) return;
     clearTimeout(validationRepairTimer);
     validationRepairTimer = setTimeout(async () => {
-      if (validationRepairBusy || state.filling) return;
+      if (validationRepairBusy || state.filling || !state.manualSessionActive || state.stopRequested) return;
       validationRepairBusy = true;
       try {
         for (const field of state.allFields) {

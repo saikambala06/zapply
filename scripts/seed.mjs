@@ -45,7 +45,7 @@ await db.collection("users").insertOne({
   plan: "free",
   trialEndsAt: new Date(Date.now() + 3 * 86_400_000),
   settings: {
-    autofillOnLoad: true, autoPilot: false, showOverlay: true,
+    autofillOnLoad: false, autoPilot: false, showOverlay: true,
     trackAutomatically: true, reuseSavedResponses: true, aiAnswers: false,
     fillDelayMs: 120, dailyGoal: 10, excludedDomains: [], theme: "system",
   },

@@ -300,6 +300,100 @@
        norm(el.value) === norm(best.value));
   }
 
+  /**
+   * Return the actual visible option text for one radio/checkbox control.
+   * iCIMS and several older ATSs often hide the input and render the option
+   * text in a sibling <span>/<div>, so `parentElement.textContent` can contain
+   * the whole question or even every option. That makes partial matching pick
+   * the first radio. We deliberately prefer the associated label and small
+   * option-like siblings and never use a large group container as the option
+   * label.
+   */
+  function radioOptionText(radio) {
+    if (!radio) return "";
+    const candidates = [];
+    const add = (node) => {
+      if (!node) return;
+      const t = visibleText(node);
+      if (t && t.length <= 240 && !candidates.includes(t)) candidates.push(t);
+    };
+
+    if (radio.id) {
+      try {
+        document.querySelectorAll(`label[for="${CSS.escape(radio.id)}"]`).forEach(add);
+      } catch {}
+    }
+    add(radio.closest("label"));
+    add(radio.getAttribute("aria-label") ? { textContent: radio.getAttribute("aria-label") } : null);
+
+    // Common iCIMS/legacy markup: input + span/div containing the option text.
+    const parent = radio.parentElement;
+    if (parent) {
+      const small = Array.from(parent.children || []).filter((n) => n !== radio);
+      small.forEach((n) => {
+        const t = visibleText(n);
+        if (t && t.length <= 160) candidates.push(t);
+      });
+    }
+
+    // The immediate following sibling is frequently the option label.
+    let sib = radio.nextElementSibling;
+    for (let i = 0; sib && i < 2; i++, sib = sib.nextElementSibling) {
+      const t = visibleText(sib);
+      if (t && t.length <= 160) candidates.push(t);
+    }
+
+    // Prefer the shortest useful candidate. A group/question container is
+    // normally much longer than the actual answer option.
+    return candidates
+      .map(clean)
+      .filter(Boolean)
+      .sort((a, b) => a.length - b.length)[0] || "";
+  }
+
+  function canonicalChoice(value) {
+    const v = norm(value);
+    if (!v) return v;
+    // Normalize common EEO wording so profile values can be matched to the
+    // exact option presented by the ATS without inventing an answer.
+    if (/protected\s+veteran/.test(v)) {
+      if (/don'?t\s+wish|prefer\s+not|decline|rather\s+not/.test(v)) return "veteran:decline";
+      if (/identify|one\s+or\s+more|classification|classifications|yes|i\s+am\s+protected/.test(v)) return "veteran:protected";
+      if (/not\s+a|not\s+an|no|non[- ]?protected/.test(v)) return "veteran:not-protected";
+    }
+    return v;
+  }
+
+  function choiceScore(optionText, optionValue, target) {
+    const label = norm(optionText);
+    const val = norm(optionValue);
+    const want = norm(target);
+    if (!label && !val) return 0;
+    if (!want) return 0;
+
+    const cWant = canonicalChoice(want);
+    const cLabel = canonicalChoice(label);
+    const cVal = canonicalChoice(val);
+    if (cLabel === cWant || cVal === cWant) return 120;
+
+    // Exact phrase always beats token/substring matching.
+    if (label === want || val === want) return 115;
+    if (label && label.includes(want)) return 75;
+    if (val && val.includes(want)) return 70;
+
+    // For EEO protected-veteran choices, require the same semantic branch.
+    if (cWant.startsWith("veteran:")) {
+      if (cLabel === cWant || cVal === cWant) return 110;
+      return 0;
+    }
+
+    // Conservative token overlap for ordinary radio choices.
+    const tokens = want.split(/\W+/).filter((x) => x.length > 2);
+    if (!tokens.length) return 0;
+    const hits = tokens.filter((t) => label.includes(t) || val.includes(t)).length;
+    return hits === tokens.length ? 65 : 0;
+  }
+
   /** Radio groups: select through the real user-facing label/control. */
   function setRadioValue(el, value, synonyms) {
     if (value === undefined || value === null || String(value).trim() === "") return false;
@@ -321,44 +415,41 @@
     const accepted = (synonyms?.[value] || synonyms?.[String(value)] || []).map(norm).filter(Boolean);
     const targets = [want, ...accepted];
     let best = null, bestScore = 0;
+
     for (const radio of group) {
-      const labelEl = radio.closest('label') || (radio.id ? document.querySelector(`label[for="${CSS.escape(radio.id)}"]`) : null);
-      const label = norm(visibleText(labelEl) || radio.getAttribute('aria-label') || '');
-      const option = norm(radio.value || radio.textContent || '');
-      const hay = `${label} ${option}`.trim();
+      const label = radioOptionText(radio);
+      const option = radio.getAttribute("value") || "";
       let score = 0;
-      for (const target of targets) {
-        if (!target) continue;
-        if (hay === target || label === target || option === target) score = Math.max(score, 100);
-        else if (label.includes(target) || option.includes(target)) score = Math.max(score, 90);
-        else if (target.includes(label) && label.length > 1) score = Math.max(score, 82);
-      }
+      for (const target of targets) score = Math.max(score, choiceScore(label, option, target));
       if (score > bestScore) { bestScore = score; best = radio; }
     }
-    if (!best || bestScore < 70) return false;
 
-    if (best.getAttribute('role') === 'radio') {
-      best.scrollIntoView?.({block:'center', behavior:'instant'});
+    // Never guess between radio options. A wrong answer is worse than leaving
+    // the question unanswered for the user.
+    if (!best || bestScore < 65) return false;
+
+    best.scrollIntoView?.({ block: "center", behavior: "instant" });
+
+    if (best.getAttribute("role") === "radio") {
       best.focus?.();
       best.click?.();
-      best.dispatchEvent(new KeyboardEvent('keydown', {key:' ', code:'Space', bubbles:true}));
-      best.dispatchEvent(new KeyboardEvent('keyup', {key:' ', code:'Space', bubbles:true}));
-      best.setAttribute('aria-checked', 'true');
-      group.forEach(r => { if (r !== best) r.setAttribute('aria-checked','false'); });
-    } else {
-      best.scrollIntoView?.({block:'center', behavior:'instant'});
-      const labelEl = best.closest('label') || (best.id ? document.querySelector(`label[for="${CSS.escape(best.id)}"]`) : null);
-      if (!best.checked) {
-        // Clicking the label is more reliable on portals that visually hide the
-        // native input and attach their handler to the label/container.
-        (labelEl || best).click?.();
+      if (best.getAttribute("aria-checked") !== "true") {
+        best.dispatchEvent(new KeyboardEvent("keydown", { key: " ", code: "Space", bubbles: true }));
+        best.dispatchEvent(new KeyboardEvent("keyup", { key: " ", code: "Space", bubbles: true }));
       }
+    } else {
+      const labelEl = best.id
+        ? document.querySelector(`label[for="${CSS.escape(best.id)}"]`)
+        : best.closest("label");
+      const target = labelEl || best;
+      target.click?.();
       if (!best.checked) best.click?.();
-      fire(best, 'input', 'change', 'click', 'blur');
+      fire(best, "input", "change", "click");
+      try { best.blur?.(); } catch {}
     }
 
-    return role === 'radio'
-      ? best.getAttribute('aria-checked') === 'true'
+    return role === "radio"
+      ? best.getAttribute("aria-checked") === "true"
       : best.checked === true;
   }
 

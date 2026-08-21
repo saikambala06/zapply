@@ -198,16 +198,30 @@ async function refreshPageStatus() {
   });
 }
 
+$("stop-btn").addEventListener("click", async () => {
+  const tab = await activeTab();
+  if (!tab?.id) return;
+  await send({ type: "ZAPPLY_STOP" });
+  $("stop-btn").hidden = true;
+  $("fill-btn").hidden = false;
+  $("fill-btn").disabled = false;
+  $("fill-btn").textContent = "Fill this application";
+  setStatus("warn", "Autofill stopped", "No more fields will be changed until you click Fill this application again.");
+});
+
 $("fill-btn").addEventListener("click", async () => {
   const tab = await activeTab();
   if (!tab?.id) return;
 
   $("fill-btn").disabled = true;
   $("fill-btn").textContent = "Filling…";
+  $("stop-btn").hidden = false;
+  $("stop-btn").disabled = false;
 
   chrome.tabs.sendMessage(tab.id, { type: "ZAPPLY_RUN" }, (res) => {
     $("fill-btn").disabled = false;
     $("fill-btn").textContent = "Fill this application";
+    $("stop-btn").hidden = true;
 
     if (chrome.runtime.lastError || !res?.ok) {
       setStatus("warn", "Couldn't fill this page", "Reload it and try again.");

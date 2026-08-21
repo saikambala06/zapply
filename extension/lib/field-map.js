@@ -472,7 +472,7 @@
       weight: 11,
       match: [/\bveteran\b/i, /\bmilitary\s*(service|status)\b/i, /\bprotected\s*veteran\b/i],
       type: ["select", "radio"],
-      value: (p) => (E(p).declineToSelfIdentify ? "I don't wish to answer" : E(p).veteranStatus),
+      value: (p) => E(p).veteranStatus || (E(p).declineToSelfIdentify ? "I don't wish to answer" : null),
       options: null,
     },
     {
