@@ -190,7 +190,13 @@
       const group = role === 'radio'
         ? (name ? Array.from(document.querySelectorAll(`[role="radio"][name="${CSS.escape(name)}"]`)) : Array.from(el.closest('fieldset, [role="radiogroup"], [role="group"]')?.querySelectorAll('[role="radio"]') || [el]))
         : (name ? Array.from(document.querySelectorAll(`input[type="radio"][name="${CSS.escape(name)}"]`)) : Array.from(el.closest('fieldset, [role="radiogroup"], [role="group"]')?.querySelectorAll('input[type="radio"]') || [el]));
-      return group.some(r => role === 'radio' ? r.getAttribute('aria-checked') === 'true' : r.checked === true);
+      return group.some(r => {
+        const selected = role === 'radio' ? r.getAttribute('aria-checked') === 'true' : r.checked === true;
+        if (!selected) return false;
+        const lab = M.norm(M.visibleText(r.closest('label') || r.parentElement) || r.getAttribute('aria-label') || r.value || '');
+        const val = M.norm(r.value || '');
+        return !want || lab === want || val === want || lab.includes(want) || want.includes(lab);
+      });
     }
     if (kind === "checkbox") {
       const role = el.getAttribute("role");
@@ -205,7 +211,7 @@
     if (kind === "select") {
       if (el.tagName === "SELECT") {
         const opt = el.options[el.selectedIndex];
-        if (!opt || !opt.value || /^(select|choose|please|--)/i.test(opt.textContent || '')) return false;
+        if (!opt || /^(select|choose|please|--)/i.test(opt.textContent || '')) return false;
         const text = M.norm(opt.textContent), val = M.norm(opt.value);
         return text === want || val === want || text.includes(want) || want.includes(text);
       }
@@ -481,10 +487,24 @@
       result.unmatched = Math.max(0, result.unmatched - result.drafted);
     }
 
-    // Final pass: give controlled frameworks a moment to commit state, then
-    // detect actual validation errors. This catches cases where the DOM looked
-    // filled but the ATS's internal form state did not change.
-    await sleep(180);
+    // Final commit pass. Workday and other controlled ATS forms can render the
+    // value immediately but commit it only after a real editing/change cycle.
+    // Retry every unresolved field once before reading validation errors.
+    await sleep(250);
+    for (const field of fields) {
+      if (field.kind === 'file') continue;
+      if (M.hasValue(field.el)) continue;
+      try {
+        const retry = await fillField(field, profile, settings);
+        if (retry.status === 'filled') {
+          result.filled++;
+          result.unmatched = Math.max(0, result.unmatched - 1);
+          field.el.classList.remove('zapply-needs-you');
+          flash(field.el);
+        }
+      } catch {}
+    }
+    await sleep(350);
     const validationErrors = collectRequiredErrors();
     result.validationErrors = validationErrors;
     if (validationErrors.length) {
@@ -860,4 +880,29 @@
   } else {
     boot();
   }
+  // When Save and Continue triggers ATS validation, automatically repair fields
+  // that were visually filled but not committed. This is especially important
+  // for Workday's controlled inputs and dropdowns.
+  let validationRepairTimer = null;
+  let validationRepairBusy = false;
+  const validationObserver = new MutationObserver(() => {
+    if (validationRepairBusy || state.filling) return;
+    const errors = collectRequiredErrors();
+    if (!errors.length || !state.profile || !state.allFields.length) return;
+    clearTimeout(validationRepairTimer);
+    validationRepairTimer = setTimeout(async () => {
+      if (validationRepairBusy || state.filling) return;
+      validationRepairBusy = true;
+      try {
+        for (const field of state.allFields) {
+          if (field.kind === 'file' || M.hasValue(field.el)) continue;
+          await fillField(field, state.profile, state.session?.settings || {});
+        }
+      } finally {
+        validationRepairBusy = false;
+      }
+    }, 180);
+  });
+  try { validationObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-invalid', 'aria-checked', 'aria-expanded', 'class'] }); } catch {}
+
 })();

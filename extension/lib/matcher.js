@@ -203,17 +203,49 @@
     });
   }
 
-  /** Writes a text value and tells the host framework about it. */
+  /** Writes a value using several framework-safe strategies.  Some ATSs (notably
+   * Workday) display a value but do not commit it when only the DOM property is
+   * changed, so we use native setters first and a real editable operation as a
+   * fallback. */
   function setTextValue(el, value) {
-    el.focus?.();
-    const setter = nativeSetter(el);
-    if (setter) setter.call(el, value);
-    else el.value = value;
+    const text = String(value ?? "");
+    if (!text) return false;
+    try { el.scrollIntoView?.({ block: "center", behavior: "instant" }); } catch {}
+    try { el.focus?.({ preventScroll: true }); } catch { el.focus?.(); }
 
-    fire(el, "input", "change");
-    // Some libraries only commit on blur
+    let changed = false;
+    const setter = nativeSetter(el);
+    try {
+      if (setter) setter.call(el, text);
+      else el.value = text;
+      changed = String(el.value ?? "") === text;
+    } catch {}
+
+    // Controlled ATS inputs sometimes ignore programmatic value changes.  Use
+    // the browser editing command while the input is focused; this produces a
+    // real input event and is accepted by more controlled components.
+    if (!changed || String(el.value ?? "") !== text) {
+      try {
+        if (typeof el.select === "function") el.select();
+        if (document.execCommand) document.execCommand("insertText", false, text);
+        changed = String(el.value ?? "") === text;
+      } catch {}
+    }
+
+    // setRangeText is another safe editing path for inputs that reject the
+    // native setter but expose the standard editing API.
+    if (!changed && typeof el.setRangeText === "function") {
+      try {
+        const current = String(el.value ?? "");
+        el.setSelectionRange?.(0, current.length);
+        el.setRangeText(text, 0, current.length, "end");
+        changed = String(el.value ?? "") === text;
+      } catch {}
+    }
+
+    fire(el, "beforeinput", "input", "change");
     fire(el, "blur");
-    return true;
+    return String(el.value ?? "") === text;
   }
 
   const norm = (s) => (s || "").toString().toLowerCase().replace(/\s+/g, " ").trim();
@@ -227,40 +259,45 @@
     if (!value) return false;
     const options = Array.from(el.options ?? []);
     if (!options.length) return false;
-
     const want = norm(value);
     const accepted = synonyms?.[value]?.map(norm) ?? [want];
-
     const score = (opt) => {
-      const text = norm(opt.textContent);
-      const val = norm(opt.value);
+      const text = norm(opt.textContent), val = norm(opt.value);
       if (!text && !val) return 0;
       if (text === want || val === want) return 100;
       for (const a of accepted) {
         if (!a) continue;
-        if (text === a || val === a) return 90;
-        if (text.startsWith(a) || val.startsWith(a)) return 70;
-        if (text.includes(a) || val.includes(a)) return 55;
+        if (text === a || val === a) return 96;
+        if (text.startsWith(a) || val.startsWith(a)) return 82;
+        if (text.includes(a) || val.includes(a)) return 70;
       }
-      if (text.includes(want) || want.includes(text)) return 40;
+      if (text.includes(want) || want.includes(text)) return 60;
       return 0;
     };
+    let best = null, bestScore = 0;
+    options.forEach((opt) => { const s = score(opt); if (s > bestScore) { bestScore = s; best = opt; } });
+    if (!best || bestScore < 55) return false;
 
-    let best = null;
-    let bestScore = 30; // floor — below this we'd rather leave it blank
-    options.forEach((opt) => {
-      if (!opt.value && !opt.textContent?.trim()) return;
-      const s = score(opt);
-      if (s > bestScore) { bestScore = s; best = opt; }
-    });
-    if (!best) return false;
+    try { el.focus?.(); } catch {}
+    try {
+      const setter = nativeSetter(el);
+      if (setter) setter.call(el, best.value);
+      else el.value = best.value;
+      el.selectedIndex = best.index;
+    } catch { return false; }
+    fire(el, "input", "change", "blur");
 
-    const setter = nativeSetter(el);
-    if (setter) setter.call(el, best.value);
-    else el.value = best.value;
-    el.selectedIndex = best.index;
-    fire(el, "input", "change");
-    return true;
+    // Some native selects commit through keyboard interaction only.
+    const selected = el.options?.[el.selectedIndex];
+    if (!selected || norm(selected.textContent) !== norm(best.textContent)) {
+      try {
+        el.focus?.();
+        fire(el, "keydown", "keyup");
+      } catch {}
+    }
+    return Boolean(el.options?.[el.selectedIndex]) &&
+      (norm(el.options[el.selectedIndex].textContent) === norm(best.textContent) ||
+       norm(el.value) === norm(best.value));
   }
 
   /** Radio groups: select through the real user-facing label/control. */
@@ -372,79 +409,62 @@
   async function setComboboxValue(el, value, waitMs = 1200, synonyms) {
     if (!value) return false;
     const want = norm(value);
+    const getShown = () => norm(
+      el.getAttribute("aria-valuetext") || el.getAttribute("data-value") ||
+      (el.tagName === "INPUT" ? el.value : el.textContent) ||
+      el.getAttribute("aria-label") || ""
+    );
 
-    el.scrollIntoView?.({ block: "center", behavior: "instant" });
-    el.focus?.();
-    el.click?.();
-    fire(el, "mousedown", "pointerdown");
+    try { el.scrollIntoView?.({ block: "center", behavior: "instant" }); } catch {}
+    try { el.focus?.({ preventScroll: true }); } catch { el.focus?.(); }
+    try { el.click?.(); } catch {}
+    fire(el, "pointerdown", "mousedown");
 
-    const typeable =
-      el.tagName === "INPUT" ||
-      el.tagName === "TEXTAREA" ||
-      el.getAttribute("contenteditable") === "true";
-
-    if (typeable) {
-      setTextValue(el, String(value));
-      fire(el, "keydown", "keyup");
-    }
+    const typeable = el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable;
+    if (typeable) setTextValue(el, String(value));
 
     let options = await waitForOptions(waitMs);
-
-    // Nothing opened on click — try the keyboard, which some widgets require.
     if (!options.length) {
-      el.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
-      options = await waitForOptions(600);
+      fire(el, "keydown", "keyup");
+      el.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", code: "ArrowDown", bubbles: true, cancelable: true }));
+      await new Promise(r => setTimeout(r, 80));
+      options = await waitForOptions(900);
     }
     if (!options.length) return false;
 
-    let best = null;
-    let bestScore = 0;
-    options.forEach((opt) => {
-      const text = norm(opt.textContent);
-      if (!text) return;
-      let s = 0;
-      if (text === want) s = 100;
-      else if (text.startsWith(want)) s = 82;
-      else if (text.includes(want)) s = 66;
-      else if (want.includes(text) && text.length > 2) s = 58;
-      else {
-        const accepted = synonyms?.[value]?.map(norm) ?? [];
-        for (const a of accepted) {
-          if (text === a) s = Math.max(s, 96);
-          else if (text.includes(a) || a.includes(text)) s = Math.max(s, 78);
-        }
+    const accepted = (synonyms?.[value] || synonyms?.[String(value)] || []).map(norm).filter(Boolean);
+    const targets = [want, ...accepted];
+    let best = null, bestScore = 0;
+    for (const opt of options) {
+      const text = norm(opt.textContent || opt.getAttribute("aria-label") || "");
+      if (!text) continue;
+      let score = 0;
+      for (const target of targets) {
+        if (!target) continue;
+        if (text === target) score = Math.max(score, 100);
+        else if (text.startsWith(target) || target.startsWith(text)) score = Math.max(score, 88);
+        else if (text.includes(target) || target.includes(text)) score = Math.max(score, 72);
       }
-      if (s > bestScore) { bestScore = s; best = opt; }
-    });
-
-    if (!best || bestScore < 55) { closeMenu(el); return false; }
-
-    best.scrollIntoView?.({ block: "nearest" });
-    fire(best, "mouseover", "mousedown", "pointerdown");
-    best.click?.();
-    fire(best, "mouseup");
-    fire(el, "change", "input", "blur");
-    await new Promise((r) => setTimeout(r, 80));
-
-    const selectedText = norm(
-      el.getAttribute("aria-label") ||
-      el.getAttribute("aria-valuetext") ||
-      el.textContent ||
-      el.value ||
-      el.getAttribute("value") ||
-      ""
-    );
-    const selectedId = el.getAttribute("aria-activedescendant");
-    const activeText = selectedId ? norm(document.getElementById(selectedId)?.textContent) : "";
-    const committed = selectedText.includes(norm(best.textContent)) ||
-      activeText === norm(best.textContent) ||
-      selectedText.includes(want);
-    if (!committed) {
-      // A few controlled widgets update one animation frame later. Give them a
-      // second chance before reporting failure.
-      await new Promise((r) => setTimeout(r, 120));
+      if (score > bestScore) { bestScore = score; best = opt; }
     }
-    return true;
+    if (!best || bestScore < 60) return false;
+
+    try { best.scrollIntoView?.({ block: "nearest" }); } catch {}
+    try { best.click?.(); } catch {}
+    fire(best, "mouseup", "click");
+    fire(el, "input", "change", "blur");
+    await new Promise(r => setTimeout(r, 120));
+
+    const selected = document.querySelector('[role="option"][aria-selected="true"]');
+    const activeId = el.getAttribute("aria-activedescendant");
+    const active = activeId ? document.getElementById(activeId) : null;
+    const shown = getShown();
+    return Boolean(
+      selected && norm(selected.textContent).includes(norm(best.textContent)) ||
+      active && norm(active.textContent).includes(norm(best.textContent)) ||
+      shown.includes(norm(best.textContent)) ||
+      shown.includes(want)
+    );
   }
 
   /** Rebuilds a File from the stored base64 data URL. */
