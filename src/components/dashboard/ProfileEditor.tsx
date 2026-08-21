@@ -494,12 +494,12 @@ export default function ProfileEditor({
               <label className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-line bg-canvas px-6 py-10 text-center transition hover:border-brand-300 hover:bg-brand-50">
                 <Upload className="h-6 w-6 text-brand-500" />
                 <span className="mt-3 text-[15px] font-semibold">Upload your resume</span>
-                <span className="mt-1 text-[13px] text-ink-soft">PDF, DOCX or TXT · up to 4 MB</span>
+                <span className="mt-1 text-[13px] text-ink-soft">PDF, DOC, DOCX or TXT · up to 8 MB</span>
                 <span className="mt-1 text-[12px] text-ink-faint">Attached automatically to applications that ask for a file</span>
                 <input
                   type="file"
                   className="hidden"
-                  accept=".pdf,.docx,.txt"
+                  accept=".pdf,.doc,.docx,.txt"
                   onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadResume(f); }}
                 />
               </label>
@@ -522,7 +522,7 @@ export default function ProfileEditor({
                       <input
                         type="file"
                         className="hidden"
-                        accept=".pdf,.docx,.txt"
+                        accept=".pdf,.doc,.docx,.txt"
                         disabled={parsing}
                         onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) readResume(f); }}
                       />

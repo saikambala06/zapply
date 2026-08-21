@@ -5,7 +5,7 @@ import { ok, fail, handler } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
 
-const MAX_BYTES = 4 * 1024 * 1024; // Vercel body limit headroom
+const MAX_BYTES = 8 * 1024 * 1024; // keep enough headroom for larger resumes
 
 /**
  * Stores a resume/cover letter on the profile as a base64 data URL so the
@@ -20,10 +20,11 @@ export const POST = handler(async (req: Request) => {
   const kind = (String(form.get("kind") ?? "resume") || "resume") as "resume" | "coverLetter" | "transcript" | "other";
 
   if (!file) return fail("Choose a file to upload.", 400);
-  if (file.size > MAX_BYTES) return fail("That file is over 4 MB. Compress it and try again.", 413);
+  if (file.size > MAX_BYTES) return fail("That file is over 8 MB. Compress it and try again.", 413);
 
-  const allowed = ["application/pdf", "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/plain"];
-  if (!allowed.includes(file.type)) return fail("Upload a PDF, DOC, DOCX or TXT file.", 415);
+  const allowed = ["application/pdf", "application/msword", "application/vnd.ms-word", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/octet-stream", "text/plain", "text/markdown"];
+  const extOk = /\.(pdf|doc|docx|txt|md)$/i.test(file.name);
+  if (!allowed.includes(file.type) && !extOk) return fail("Upload a PDF, DOC, DOCX or TXT file.", 415);
 
   await connectDB();
   const profile =

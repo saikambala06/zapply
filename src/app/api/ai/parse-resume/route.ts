@@ -6,7 +6,7 @@ import { normalizeParsedResume } from "@/lib/profile-shape";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const MAX_BYTES = 4 * 1024 * 1024;
+const MAX_BYTES = 8 * 1024 * 1024;
 
 const SHAPE = `{"personal":{"firstName":"","middleName":"","lastName":"","email":"","phone":"","city":"","state":"","country":""},
  "summary":"",
@@ -53,19 +53,29 @@ export const POST = handler(async (req: Request) => {
   const form = await req.formData();
   const file = form.get("file") as File | null;
   if (!file) return fail("Choose a resume file to read.", 400);
-  if (file.size > MAX_BYTES) return fail("That file is over 4 MB. Compress it and try again.", 413);
+  if (file.size > MAX_BYTES) return fail("That file is over 8 MB. Compress it and try again.", 413);
 
   const buffer = Buffer.from(await file.arrayBuffer());
-  const parsed = await parseResumeDocument({
-    buffer,
-    mimeType: file.type,
-    filename: file.name,
-    system: SYSTEM,
-    shape: SHAPE,
-  });
+  try {
+    const parsed = await parseResumeDocument({
+      buffer,
+      mimeType: file.type || "application/octet-stream",
+      filename: file.name,
+      system: SYSTEM,
+      shape: SHAPE,
+    });
 
-  // A model asked for `skills: string[]` still returns `[{name:"React"}]`
-  // sometimes. Coercing here means a drifted shape can never reach the
-  // database and blow up the next profile save.
-  return ok(normalizeParsedResume(parsed));
+    // A model asked for `skills: string[]` still returns `[{name:"React"}]`
+    // sometimes. Coercing here means a drifted shape can never reach the
+    // database and blow up the next profile save.
+    return ok(normalizeParsedResume(parsed));
+  } catch (err: any) {
+    const message = String(err?.message || "We couldn't parse that resume.");
+    // Bad/corrupt/unsupported files are client-fixable; don't turn them into
+    // opaque 500 errors. AI/provider errors are allowed to bubble to handler().
+    if (/couldn't read this (pdf|docx|legacy doc)|unsupported resume format|almost no readable text|password protected|encrypted|corrupted/i.test(message)) {
+      return fail(message, 422);
+    }
+    throw err;
+  }
 });

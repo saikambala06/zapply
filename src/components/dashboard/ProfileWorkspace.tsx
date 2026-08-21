@@ -212,7 +212,7 @@ export default function ProfileWorkspace({
           </p>
         )}
 
-        <input ref={fileRef} type="file" accept=".pdf,.docx,.txt" className="hidden" onChange={onResumePicked} />
+        <input ref={fileRef} type="file" accept=".pdf,.doc,.docx,.txt" className="hidden" onChange={onResumePicked} />
       </div>
 
       {error && (

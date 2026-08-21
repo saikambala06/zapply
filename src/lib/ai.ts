@@ -207,31 +207,87 @@ export function profileToContext(p: any) {
  * input we extract first. unpdf wraps pdf.js and runs in serverless without
  * native bindings; mammoth handles .docx.
  */
+export type ResumeFileKind = "pdf" | "doc" | "docx" | "text";
+
+function detectResumeFileKind(buffer: Buffer, mimeType: string, filename: string): ResumeFileKind | null {
+  const name = filename.toLowerCase();
+  const mime = (mimeType || "").toLowerCase();
+
+  // Prefer the actual file signature over browser-provided MIME metadata. Some
+  // browsers/OS combinations report `application/octet-stream` for resumes.
+  if (buffer.length >= 5 && buffer.subarray(0, 5).toString("ascii") === "%PDF-") return "pdf";
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]))) return "doc";
+  if (buffer.length >= 4 && buffer.subarray(0, 4).equals(Buffer.from([0x50, 0x4B, 0x03, 0x04]))) return "docx";
+
+  if (mime === "application/pdf" || /\.pdf$/i.test(name)) return "pdf";
+  if (mime === "application/msword" || /\.doc$/i.test(name)) return "doc";
+  if (mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || /\.docx$/i.test(name)) return "docx";
+  if (mime.startsWith("text/") || /\.(txt|md)$/i.test(name)) return "text";
+  return null;
+}
+
+function normaliseExtractedText(text: unknown): string {
+  return String(text ?? "")
+    .replace(/\u0000/g, "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/**
+ * Pulls plain text out of PDF, DOC, DOCX and plain-text resumes.
+ *
+ * PDFs are read with unpdf, modern Word documents with mammoth, and legacy
+ * Word 97-2003 `.doc` files with word-extractor. The latter is pure Node JS,
+ * so it does not require LibreOffice/antiword binaries and remains deployable
+ * on Vercel/serverless runtimes.
+ */
 export async function extractResumeText({
   buffer, mimeType, filename,
 }: { buffer: Buffer; mimeType: string; filename: string }): Promise<string> {
-  const isPdf = mimeType === "application/pdf" || /\.pdf$/i.test(filename);
-  const isDocx =
-    mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
-    /\.docx$/i.test(filename);
-  const isText = mimeType.startsWith("text/") || /\.(txt|md)$/i.test(filename);
+  const kind = detectResumeFileKind(buffer, mimeType, filename);
 
-  if (isPdf) {
-    const { extractText, getDocumentProxy } = await import("unpdf");
-    const pdf = await getDocumentProxy(new Uint8Array(buffer));
-    const { text } = await extractText(pdf, { mergePages: true });
-    return Array.isArray(text) ? text.join("\n") : text;
+  if (!kind) {
+    throw new Error("Unsupported resume format. Upload PDF, DOC, DOCX or TXT.");
   }
 
-  if (isDocx) {
-    const mammoth = await import("mammoth");
-    const { value } = await mammoth.extractRawText({ buffer });
-    return value;
+  if (kind === "pdf") {
+    try {
+      const { extractText, getDocumentProxy } = await import("unpdf");
+      const pdf = await getDocumentProxy(new Uint8Array(buffer));
+      const { text } = await extractText(pdf, { mergePages: true });
+      return normaliseExtractedText(Array.isArray(text) ? text.join("\n") : text);
+    } catch (err: any) {
+      throw new Error(`We couldn't read this PDF. ${err?.message ?? "The PDF may be corrupted or password protected."}`);
+    }
   }
 
-  if (isText) return buffer.toString("utf8");
+  if (kind === "docx") {
+    try {
+      const mammoth = await import("mammoth");
+      const { value } = await mammoth.extractRawText({ buffer });
+      return normaliseExtractedText(value);
+    } catch (err: any) {
+      throw new Error(`We couldn't read this DOCX file. ${err?.message ?? "The Word document may be corrupted."}`);
+    }
+  }
 
-  throw new Error("Upload a PDF, DOCX or TXT resume. Older .doc files aren't supported — export as PDF.");
+  if (kind === "doc") {
+    try {
+      const module = await import("word-extractor");
+      const WordExtractor: any = (module as any).default ?? module;
+      const extractor = new WordExtractor();
+      const document = await extractor.extract(buffer);
+      return normaliseExtractedText(document?.getBody?.());
+    } catch (err: any) {
+      throw new Error(
+        `We couldn't read this legacy DOC file. ${err?.message ?? "The Word 97-2003 document may be encrypted or corrupted."}`
+      );
+    }
+  }
+
+  return normaliseExtractedText(buffer.toString("utf8"));
 }
 
 /** Reads a resume file and returns structured profile sections. */
