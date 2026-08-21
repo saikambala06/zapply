@@ -17,7 +17,7 @@
   /*  Label derivation                                                   */
   /* ------------------------------------------------------------------ */
 
-  const clean = (s) => (s || "").replace(/\s+/g, " ").replace(/[*✱]/g, "").trim();
+  const clean = (s) => (s || "").replace(/[\u200B-\u200D\uFEFF]/g, "").replace(/\s+/g, " ").replace(/[*✱]/g, "").trim();
 
   /** Text of the element, ignoring nested inputs and hidden helper text. */
   function visibleText(el) {
@@ -66,8 +66,12 @@
     push(el.getAttribute("placeholder"));
     push(el.getAttribute("title"));
     push(el.getAttribute("data-label"));
-    push(el.getAttribute("data-automation-id"));   // Workday
+    push(el.getAttribute("data-automation-id"));   // Workday / Oracle / SAP
     push(el.getAttribute("data-qa"));              // Lever / Ashby
+    push(el.getAttribute("data-testid"));           // React / MUI / custom ATS
+    push(el.getAttribute("data-test-id"));
+    push(el.getAttribute("data-field"));
+    push(el.getAttribute("autocomplete"));
 
     // 4. Wrapping <label>
     const wrapping = el.closest("label");
@@ -91,7 +95,26 @@
       }
     }
 
-    // 6. Fall back to machine names, split into words so /first name/ matches "firstName"
+    // 6. Add a small section/fieldset context. This is important for labels
+    // like "Start Date" and "End Date", which occur in both Education and Work
+    // History on the same page. Keep it short so it cannot drown out the real
+    // field label.
+    let contextNode = el.parentElement;
+    for (let depth = 0; contextNode && depth < 6; depth++, contextNode = contextNode.parentElement) {
+      const heading = contextNode.querySelector(
+        ':scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > legend, ' +
+        ':scope > [role="heading"], :scope > .section-title, :scope > [class*="sectionTitle"]'
+      );
+      if (heading && !heading.contains(el)) {
+        const t = clean(heading.textContent);
+        if (t && t.length <= 120) {
+          push(t);
+          break;
+        }
+      }
+    }
+
+    // 7. Fall back to machine names, split into words so /first name/ matches "firstName"
     push(humanize(el.getAttribute("name")));
     push(humanize(el.id));
 
@@ -125,10 +148,11 @@
       el.getAttribute("role") === "combobox" ||
       el.getAttribute("aria-haspopup") === "listbox" ||
       el.getAttribute("aria-haspopup") === "menu" ||
-      (el.tagName === "BUTTON" && /dropdown|select/i.test(el.getAttribute("data-automation-id") || ""))
+      (el.tagName === "BUTTON" && /dropdown|select|prompt/i.test(el.getAttribute("data-automation-id") || ""))
     ) {
       return "select";
     }
+    if (el.getAttribute("role") === "textbox" || el.isContentEditable) return "text";
     const type = (el.type || "text").toLowerCase();
     if (["checkbox", "radio", "file", "date", "month", "number", "email", "tel", "url"].includes(type)) return type;
     return "text";
@@ -255,27 +279,75 @@
    * `synonyms` lets a rule say: for the canonical answer "No", accept an option
    * whose text contains "no", "i do not", "false", etc.
    */
+  function normalizeChoiceText(s) {
+    return norm(s)
+      .replace(/[’‘`]/g, "'")
+      .replace(/\s*&\s*/g, " and ")
+      .replace(/\bmasters?\b/g, "master's")
+      .replace(/\bbachelors?\b/g, "bachelor's")
+      .replace(/\bph\.?d\.?\b/g, "doctorate")
+      .replace(/\bdoctor of philosophy\b/g, "doctorate")
+      .replace(/\bhigh school diploma\b/g, "high school")
+      .replace(/\bunited states of america\b/g, "united states")
+      .replace(/\busa\b/g, "united states")
+      .replace(/\bus\b/g, "united states")
+      .replace(/\bmobile phone\b/g, "mobile")
+      .replace(/\bcell phone\b/g, "mobile")
+      .replace(/\bfull time\b/g, "full-time")
+      .replace(/\bpart time\b/g, "part-time")
+      .replace(/\bnon binary\b/g, "non-binary")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function choiceSimilarity(a, b) {
+    const A = new Set(normalizeChoiceText(a).split(/\W+/).filter((x) => x.length > 1));
+    const B = new Set(normalizeChoiceText(b).split(/\W+/).filter((x) => x.length > 1));
+    if (!A.size || !B.size) return 0;
+    let hits = 0;
+    A.forEach((x) => { if (B.has(x)) hits++; });
+    return hits / Math.max(A.size, B.size);
+  }
+
+  /**
+   * Native selects are common on Greenhouse, Lever, Taleo and smaller ATSs.
+   * Match exact text/value first, then normalized synonyms, then conservative
+   * token overlap. Never choose the placeholder option.
+   */
   function setSelectValue(el, value, synonyms) {
     if (!value) return false;
     const options = Array.from(el.options ?? []);
     if (!options.length) return false;
-    const want = norm(value);
-    const accepted = synonyms?.[value]?.map(norm) ?? [want];
+    const want = normalizeChoiceText(value);
+    const rawWant = norm(value);
+    const accepted = [
+      ...(synonyms?.[value] ?? []),
+      ...(synonyms?.[String(value)] ?? []),
+    ].map(normalizeChoiceText).filter(Boolean);
+    const targets = [want, rawWant, ...accepted].filter(Boolean);
+
     const score = (opt) => {
-      const text = norm(opt.textContent), val = norm(opt.value);
+      const text = normalizeChoiceText(opt.textContent);
+      const val = normalizeChoiceText(opt.value);
       if (!text && !val) return 0;
-      if (text === want || val === want) return 100;
-      for (const a of accepted) {
-        if (!a) continue;
-        if (text === a || val === a) return 96;
-        if (text.startsWith(a) || val.startsWith(a)) return 82;
-        if (text.includes(a) || val.includes(a)) return 70;
+      if (/^(select|choose|please select|please choose|--|none)$/i.test(text)) return 0;
+
+      let best = 0;
+      for (const target of targets) {
+        if (!target) continue;
+        if (text === target || val === target) best = Math.max(best, 120);
+        else if (text.startsWith(target) || val.startsWith(target) || target.startsWith(text)) best = Math.max(best, 95);
+        else if (text.includes(target) || val.includes(target) || target.includes(text)) best = Math.max(best, 78);
+        else best = Math.max(best, Math.round(choiceSimilarity(text, target) * 70));
       }
-      if (text.includes(want) || want.includes(text)) return 60;
-      return 0;
+      return best;
     };
+
     let best = null, bestScore = 0;
-    options.forEach((opt) => { const s = score(opt); if (s > bestScore) { bestScore = s; best = opt; } });
+    options.forEach((opt) => {
+      const sc = score(opt);
+      if (sc > bestScore) { bestScore = sc; best = opt; }
+    });
     if (!best || bestScore < 55) return false;
 
     try { el.focus?.(); } catch {}
@@ -285,19 +357,15 @@
       else el.value = best.value;
       el.selectedIndex = best.index;
     } catch { return false; }
-    fire(el, "input", "change", "blur");
 
-    // Some native selects commit through keyboard interaction only.
+    fire(el, "input", "change");
+    try { el.blur?.(); } catch {}
+
     const selected = el.options?.[el.selectedIndex];
-    if (!selected || norm(selected.textContent) !== norm(best.textContent)) {
-      try {
-        el.focus?.();
-        fire(el, "keydown", "keyup");
-      } catch {}
-    }
-    return Boolean(el.options?.[el.selectedIndex]) &&
-      (norm(el.options[el.selectedIndex].textContent) === norm(best.textContent) ||
-       norm(el.value) === norm(best.value));
+    return Boolean(selected) &&
+      !/^(select|choose|please select|please choose|--|none)$/i.test(selected.textContent || "") &&
+      (normalizeChoiceText(selected.textContent) === normalizeChoiceText(best.textContent) ||
+       normalizeChoiceText(selected.value) === normalizeChoiceText(best.value));
   }
 
   /**
@@ -497,64 +565,123 @@
    * did nothing at all. Now we open first, type only if it accepts text, and
    * poll for the menu instead of assuming it appeared within 260ms.
    */
+  function setComboboxText(el, text) {
+    const value = String(text ?? "");
+    try {
+      const setter = nativeSetter(el);
+      if (setter) setter.call(el, value);
+      else if (el.isContentEditable) el.textContent = value;
+      else el.value = value;
+    } catch {
+      try { el.value = value; } catch {}
+    }
+    fire(el, "input");
+  }
+
+  function optionScoreForTarget(option, targets) {
+    const text = normalizeChoiceText(option.textContent || option.getAttribute("aria-label") || option.getAttribute("data-value") || "");
+    const value = normalizeChoiceText(option.getAttribute("value") || option.getAttribute("data-value") || "");
+    if (!text && !value) return 0;
+    if (/^(select|choose|please select|please choose|no results found|loading)$/i.test(text)) return 0;
+    let best = 0;
+    for (const target of targets) {
+      const t = normalizeChoiceText(target);
+      if (!t) continue;
+      if (text === t || value === t) best = Math.max(best, 130);
+      else if (text.startsWith(t) || t.startsWith(text) || value.startsWith(t)) best = Math.max(best, 100);
+      else if (text.includes(t) || t.includes(text) || value.includes(t)) best = Math.max(best, 82);
+      else best = Math.max(best, Math.round(choiceSimilarity(text, t) * 72));
+    }
+    return best;
+  }
+
   async function setComboboxValue(el, value, waitMs = 1200, synonyms) {
-    if (!value) return false;
+    if (value === undefined || value === null || String(value).trim() === "") return false;
     const want = norm(value);
-    const getShown = () => norm(
-      el.getAttribute("aria-valuetext") || el.getAttribute("data-value") ||
-      (el.tagName === "INPUT" ? el.value : el.textContent) ||
-      el.getAttribute("aria-label") || ""
-    );
+    const before =
+      norm(el.getAttribute("aria-valuetext") || el.getAttribute("data-value") || "") ||
+      (el.tagName === "INPUT" ? norm(el.value) : "");
 
     try { el.scrollIntoView?.({ block: "center", behavior: "instant" }); } catch {}
-    try { el.focus?.({ preventScroll: true }); } catch { el.focus?.(); }
+    try { el.focus?.({ preventScroll: true }); } catch {}
+    try { fire(el, "pointerdown", "mousedown"); } catch {}
     try { el.click?.(); } catch {}
-    fire(el, "pointerdown", "mousedown");
 
     const typeable = el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable;
-    if (typeable) setTextValue(el, String(value));
+    if (typeable) {
+      // Clear a stale filter without blurring the control, then type the target.
+      setComboboxText(el, "");
+      await new Promise((r) => setTimeout(r, 30));
+      setComboboxText(el, String(value));
+    }
 
     let options = await waitForOptions(waitMs);
     if (!options.length) {
-      fire(el, "keydown", "keyup");
-      el.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", code: "ArrowDown", bubbles: true, cancelable: true }));
-      await new Promise(r => setTimeout(r, 80));
-      options = await waitForOptions(900);
+      // Some ATSs render the list only after ArrowDown/Space on the focused
+      // control (notably Workday/Oracle custom buttons).
+      try {
+        el.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", code: "ArrowDown", bubbles: true, cancelable: true }));
+        el.dispatchEvent(new KeyboardEvent("keyup", { key: "ArrowDown", code: "ArrowDown", bubbles: true, cancelable: true }));
+        el.dispatchEvent(new KeyboardEvent("keydown", { key: " ", code: "Space", bubbles: true, cancelable: true }));
+        el.dispatchEvent(new KeyboardEvent("keyup", { key: " ", code: "Space", bubbles: true, cancelable: true }));
+      } catch {}
+      options = await waitForOptions(Math.max(900, waitMs));
     }
-    if (!options.length) return false;
 
-    const accepted = (synonyms?.[value] || synonyms?.[String(value)] || []).map(norm).filter(Boolean);
-    const targets = [want, ...accepted];
+    const accepted = [
+      ...(synonyms?.[value] ?? []),
+      ...(synonyms?.[String(value)] ?? []),
+    ];
+    const targets = [value, want, ...accepted].filter(Boolean);
     let best = null, bestScore = 0;
     for (const opt of options) {
-      const text = norm(opt.textContent || opt.getAttribute("aria-label") || "");
-      if (!text) continue;
-      let score = 0;
-      for (const target of targets) {
-        if (!target) continue;
-        if (text === target) score = Math.max(score, 100);
-        else if (text.startsWith(target) || target.startsWith(text)) score = Math.max(score, 88);
-        else if (text.includes(target) || target.includes(text)) score = Math.max(score, 72);
-      }
+      const score = optionScoreForTarget(opt, targets);
       if (score > bestScore) { bestScore = score; best = opt; }
     }
-    if (!best || bestScore < 60) return false;
+
+    // If the menu was initially filtered too aggressively, reopen it once and
+    // search the unfiltered option list before giving up.
+    if (!best || bestScore < 55) {
+      if (typeable) {
+        setComboboxText(el, "");
+        try { el.click?.(); } catch {}
+        options = await waitForOptions(Math.max(900, waitMs));
+        best = null; bestScore = 0;
+        for (const opt of options) {
+          const score = optionScoreForTarget(opt, targets);
+          if (score > bestScore) { bestScore = score; best = opt; }
+        }
+      }
+    }
+    if (!best || bestScore < 55) return false;
 
     try { best.scrollIntoView?.({ block: "nearest" }); } catch {}
+    try { best.focus?.({ preventScroll: true }); } catch {}
     try { best.click?.(); } catch {}
-    fire(best, "mouseup", "click");
-    fire(el, "input", "change", "blur");
-    await new Promise(r => setTimeout(r, 120));
+    await new Promise((r) => setTimeout(r, 60));
+    try {
+      best.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
+      best.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
+    } catch {}
 
-    const selected = document.querySelector('[role="option"][aria-selected="true"]');
+    await new Promise((r) => setTimeout(r, 160));
+    fire(el, "input", "change", "blur");
+
+    const bestText = normalizeChoiceText(best.textContent || best.getAttribute("aria-label") || "");
+    const selected = Array.from(document.querySelectorAll('[role="option"][aria-selected="true"], [aria-selected="true"][data-value]'))
+      .find((n) => normalizeChoiceText(n.textContent || n.getAttribute("aria-label") || "").includes(bestText));
     const activeId = el.getAttribute("aria-activedescendant");
     const active = activeId ? document.getElementById(activeId) : null;
-    const shown = getShown();
+    const shown = normalizeChoiceText(
+      el.getAttribute("aria-valuetext") || el.getAttribute("data-value") ||
+      (el.tagName === "INPUT" ? el.value : "")
+    );
+
     return Boolean(
-      selected && norm(selected.textContent).includes(norm(best.textContent)) ||
-      active && norm(active.textContent).includes(norm(best.textContent)) ||
-      shown.includes(norm(best.textContent)) ||
-      shown.includes(want)
+      (selected && (normalizeChoiceText(selected.textContent).includes(bestText) || bestText.includes(normalizeChoiceText(selected.textContent)))) ||
+      (active && normalizeChoiceText(active.textContent).includes(bestText)) ||
+      (shown && shown !== normalizeChoiceText(before) && (shown.includes(bestText) || shown.includes(want))) ||
+      (el.getAttribute("aria-valuetext") && normalizeChoiceText(el.getAttribute("aria-valuetext")).includes(want))
     );
   }
 
@@ -715,7 +842,7 @@
   }
 
   function isFillable(el) {
-    if (!el || el.disabled || el.readOnly) return false;
+    if (!el || el.disabled || el.readOnly || el.getAttribute("aria-disabled") === "true") return false;
     if (el.type === "hidden") return false;
     if (el.getAttribute("aria-hidden") === "true") return false;
     const style = getComputedStyle(el);
@@ -795,7 +922,7 @@
     for (const cb of group) {
       const label = norm(`${visibleText(cb.closest("label") || cb.parentElement)} ${cb.getAttribute("aria-label") || ""} ${cb.value || ""}`);
       const shouldCheck = wants.some((want) => {
-        if (want === "yes") return true;
+        if (want === "yes") return /\byes\b|\bagree\b|\baccept\b/i.test(label);
         const accepted = synonyms?.[want]?.map(norm) ?? [want];
         return accepted.some((x) => x && (label === x || label.includes(x) || x.includes(label)));
       });
@@ -850,6 +977,7 @@
     hasValue,
     visibleText,
     norm,
+    normalizeChoiceText,
     normalizeQuestion,
     similarity,
     tokenize,

@@ -361,12 +361,18 @@ export default function ProfileEditor({
                 <Field label="Preferred name" value={p.personal?.preferredName} onChange={(v) => setPath("personal.preferredName", v)} hint="Used when a form asks for a preferred or nickname" />
                 <Field label="Pronouns" value={p.personal?.pronouns} onChange={(v) => setPath("personal.pronouns", v)} placeholder="he/him" />
               </div>
-              <div className="grid gap-4 sm:grid-cols-2">
+              <div className="grid gap-4 sm:grid-cols-3">
                 <Field label="Email" type="email" value={p.personal?.email} onChange={(v) => setPath("personal.email", v)} />
+                <Select label="Phone type" value={p.personal?.phoneType} onChange={(v) => setPath("personal.phoneType", v)}
+                  options={["Mobile", "Home", "Personal", "Work"]} />
                 <div className="grid grid-cols-[90px_1fr] gap-2">
                   <Field label="Code" value={p.personal?.phoneCountryCode} onChange={(v) => setPath("personal.phoneCountryCode", v)} placeholder="+1" />
                   <Field label="Phone" value={p.personal?.phone} onChange={(v) => setPath("personal.phone", v)} placeholder="415 555 0142" />
                 </div>
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field label="Date of birth" type="date" value={p.personal?.dateOfBirth} onChange={(v) => setPath("personal.dateOfBirth", v)} />
+                <Field label="Nationality / citizenship" value={p.personal?.nationality} onChange={(v) => setPath("personal.nationality", v)} />
               </div>
               <Field label="Street address" value={p.personal?.address} onChange={(v) => setPath("personal.address", v)} />
               <Field label="Address line 2" value={p.personal?.addressLine2} onChange={(v) => setPath("personal.addressLine2", v)} />
@@ -422,6 +428,8 @@ export default function ProfileEditor({
                     <Select label="Employment type" value={x.employmentType} onChange={(v) => updateRow("experience", i, { employmentType: v })}
                       options={["Full-time", "Part-time", "Internship", "Contract", "Freelance", "Co-op"]} />
                     <Field label="Location" value={x.location} onChange={(v) => updateRow("experience", i, { location: v })} />
+                    <Select label="Work location type" value={x.locationType} onChange={(v) => updateRow("experience", i, { locationType: v })}
+                      options={["On-site", "Remote", "Hybrid"]} />
                     <Field label="Start" type="month" value={x.startDate} onChange={(v) => updateRow("experience", i, { startDate: v })} />
                     <div>
                       <Field label="End" type="month" value={x.endDate} onChange={(v) => updateRow("experience", i, { endDate: v })} />
@@ -459,6 +467,7 @@ export default function ProfileEditor({
                       options={["High School Diploma", "Associate's Degree", "Bachelor's Degree", "Master's Degree", "MBA", "Doctorate (PhD)", "Bootcamp", "Other"]} />
                     <Field label="Field of study" value={e.fieldOfStudy} onChange={(v) => updateRow("education", i, { fieldOfStudy: v })} />
                     <Field label="GPA" value={e.gpa} onChange={(v) => updateRow("education", i, { gpa: v })} placeholder="3.8" />
+                    <Field label="School location" value={e.location} onChange={(v) => updateRow("education", i, { location: v })} />
                     <Field label="Start" type="month" value={e.startDate} onChange={(v) => updateRow("education", i, { startDate: v })} />
                     <Field label="End (or expected)" type="month" value={e.endDate} onChange={(v) => updateRow("education", i, { endDate: v })} />
                   </div>

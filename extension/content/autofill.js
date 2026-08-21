@@ -106,59 +106,85 @@
   /*  Field collection                                                   */
   /* ================================================================== */
 
+  function collectSearchRoots() {
+    const roots = [document];
+    const seen = new Set(roots);
+    const visit = (root) => {
+      try {
+        root.querySelectorAll("*").forEach((el) => {
+          if (el.shadowRoot && !seen.has(el.shadowRoot)) {
+            seen.add(el.shadowRoot);
+            roots.push(el.shadowRoot);
+            visit(el.shadowRoot);
+          }
+        });
+      } catch {}
+    };
+    visit(document);
+    return roots;
+  }
+
   function collectFields(adapter) {
+    const searchRoots = collectSearchRoots();
     const roots = [];
-    document.querySelectorAll(adapter.formSelector || "form").forEach((f) => roots.push(f));
-    if (!roots.length) roots.push(document.body);
+    for (const root of searchRoots) {
+      try {
+        root.querySelectorAll(adapter.formSelector || "form").forEach((f) => roots.push(f));
+      } catch {}
+    }
+    // Generic/custom web-component forms often have no <form> at all.
+    if (!roots.length) roots.push(...searchRoots);
 
     const seen = new Set();
     const fields = [];
 
     roots.forEach((root) => {
-      root
-        .querySelectorAll(
-          'input, textarea, select, ' +
-          '[role="combobox"], [role="textbox"][contenteditable="true"], ' +
-          // Custom dropdowns that aren't <select>: Workday renders these as
-          // buttons, so scanning only form elements missed every one of them.
-          '[aria-haspopup="listbox"], [aria-haspopup="menu"], ' +
-          'button[data-automation-id*="Dropdown"], div[role="button"][aria-expanded], ' +
-          '[role="checkbox"], [role="radio"]'
-        )
-        .forEach((el) => {
-          if (seen.has(el)) return;
-          seen.add(el);
-          if (!M.isFillable(el)) return;
-          if (["submit", "reset", "image"].includes(el.type)) return;
-          // A <button> only counts as a field if it opens a listbox.
-          if (el.tagName === "BUTTON" || el.getAttribute("role") === "button") {
-            const opensMenu =
-              el.getAttribute("aria-haspopup") === "listbox" ||
-              el.getAttribute("aria-haspopup") === "menu" ||
-              /dropdown|select/i.test(el.getAttribute("data-automation-id") || "");
-            if (!opensMenu) return;
-          } else if (el.type === "button") return;
+      try {
+        root
+          .querySelectorAll(
+            'input, textarea, select, ' +
+            '[role="combobox"], [role="textbox"][contenteditable="true"], ' +
+            '[aria-haspopup="listbox"], [aria-haspopup="menu"], ' +
+            'button[data-automation-id*="Dropdown"], button[data-automation-id*="Prompt"], ' +
+            'div[role="button"][aria-expanded], ' +
+            '[role="checkbox"], [role="radio"], ' +
+            '[data-qa], [data-testid], [data-test-id], [contenteditable="true"]'
+          )
+          .forEach((el) => {
+            if (seen.has(el)) return;
+            seen.add(el);
+            if (!M.isFillable(el)) return;
+            if (["submit", "reset", "image"].includes(el.type)) return;
 
-          // Only one representative is needed for grouped radios/checkboxes:
-          // the handler fills the entire native/custom group.
-          if (el.type === "radio" || el.type === "checkbox" ||
-              el.getAttribute("role") === "radio" || el.getAttribute("role") === "checkbox") {
-            const role = el.getAttribute("role") || el.type;
-            const name = el.getAttribute("name");
-            const container = el.closest("fieldset, [role='radiogroup'], [role='group']");
-            if (container && !container.dataset.zapplyGroupKey) {
-              container.dataset.zapplyGroupKey = `g${Math.random().toString(36).slice(2)}`;
+            if (el.tagName === "BUTTON" || el.getAttribute("role") === "button") {
+              const opensMenu =
+                el.getAttribute("aria-haspopup") === "listbox" ||
+                el.getAttribute("aria-haspopup") === "menu" ||
+                /dropdown|select|prompt/i.test(el.getAttribute("data-automation-id") || "") ||
+                el.getAttribute("aria-expanded") !== null;
+              if (!opensMenu) return;
+            } else if (el.type === "button") return;
+
+            if (el.type === "radio" || el.type === "checkbox" ||
+                el.getAttribute("role") === "radio" || el.getAttribute("role") === "checkbox") {
+              const role = el.getAttribute("role") || el.type;
+              const name = el.getAttribute("name");
+              const container = el.closest("fieldset, [role='radiogroup'], [role='group']");
+              if (container && !container.dataset.zapplyGroupKey) {
+                container.dataset.zapplyGroupKey = `g${Math.random().toString(36).slice(2)}`;
+              }
+              const groupKey = `${role}|${name || container?.dataset?.zapplyGroupKey || `single-${fields.length}`}`;
+              if (fields.some((f) => f._groupKey === groupKey && f.el !== el)) return;
+              el.dataset.zapplyGroup = el.dataset.zapplyGroup || (name || container?.dataset?.zapplyGroupKey || `g${fields.length}`);
+              const label = M.deriveLabel(el);
+              fields.push({ el, label, kind: M.fieldKind(el), rule: M.matchRule(el, label, RULES), _groupKey: groupKey });
+              return;
             }
-            const groupKey = `${role}|${name || container?.dataset?.zapplyGroupKey || `single-${fields.length}`}`;
-            if (fields.some((f) => f._groupKey === groupKey && f.el !== el)) return;
-            el.dataset.zapplyGroup = el.dataset.zapplyGroup || (name || container?.dataset?.zapplyGroupKey || `g${fields.length}`);
-            fields.push({ el, label: M.deriveLabel(el), kind: M.fieldKind(el), rule: M.matchRule(el, M.deriveLabel(el), RULES), _groupKey: groupKey });
-            return;
-          }
 
-          const label = M.deriveLabel(el);
-          fields.push({ el, label, kind: M.fieldKind(el), rule: M.matchRule(el, label, RULES) });
-        });
+            const label = M.deriveLabel(el);
+            fields.push({ el, label, kind: M.fieldKind(el), rule: M.matchRule(el, label, RULES) });
+          });
+      } catch {}
     });
 
     return fields;
@@ -170,10 +196,17 @@
 
   /** Delegates to the shared matcher so the server and extension agree. */
   function findSavedAnswer(label) {
-    // The derived label concatenates several sources; the first is usually the
-    // real question text, so match on that rather than the whole string.
-    const question = label.split(" | ")[0];
-    return M.findSavedAnswer(question, state.session?.responses ?? []);
+    // Try the visible question first, then the other reliable label sources.
+    // This helps ATSs whose <label> says only "Question" while aria-label,
+    // data-qa or the field name contains the real question.
+    const responses = state.session?.responses ?? [];
+    const candidates = String(label || "").split(" | ").map((x) => x.trim()).filter(Boolean);
+    let best = null;
+    for (const question of candidates.slice(0, 6)) {
+      const hit = M.findSavedAnswer(question, responses);
+      if (hit && (!best || (hit.confidence ?? 0) > (best.confidence ?? 0))) best = hit;
+    }
+    return best;
   }
 
   /* ================================================================== */
@@ -219,15 +252,28 @@
       if (el.tagName === "SELECT") {
         const opt = el.options[el.selectedIndex];
         if (!opt || /^(select|choose|please|--)/i.test(opt.textContent || '')) return false;
-        const text = M.norm(opt.textContent), val = M.norm(opt.value);
-        return text === want || val === want || text.includes(want) || want.includes(text);
+        const text = M.normalizeChoiceText(opt.textContent), val = M.normalizeChoiceText(opt.value);
+        const expectedChoice = M.normalizeChoiceText(expected);
+        return text === expectedChoice || val === expectedChoice || text.includes(expectedChoice) || expectedChoice.includes(text);
       }
-      // Custom selects: prefer the selected/active option and then the control's
-      // displayed value. Do not treat the question label itself as a selection.
-      const selected = el.querySelector?.('[aria-selected="true"]') || document.querySelector('[role="option"][aria-selected="true"]');
-      const text = M.norm(el.getAttribute('aria-valuetext') || el.value || (selected && selected.textContent) || '');
-      const buttonText = visible(el);
-      return Boolean(text || buttonText) && (text.includes(want) || want.includes(text) || buttonText.includes(want));
+      // Custom selects: use an actual selected option or a value attribute.
+      // Never use the whole button text because it often contains the question
+      // label (which made "Country: United States" look selected even when it
+      // wasn't committed).
+      const selected = el.querySelector?.('[aria-selected="true"]') ||
+        (el.getAttribute("aria-activedescendant") ? document.getElementById(el.getAttribute("aria-activedescendant")) : null);
+      const text = M.normalizeChoiceText(
+        el.getAttribute('aria-valuetext') ||
+        el.getAttribute('data-value') ||
+        el.value ||
+        (selected && selected.textContent) ||
+        ''
+      );
+      const expected = M.normalizeChoiceText(expected);
+      const buttonText = M.normalizeChoiceText(el.textContent || "");
+      const placeholder = /^(select|choose|please select|please choose|--)/i.test(buttonText);
+      return Boolean(text) && (text === expected || text.includes(expected) || expected.includes(text)) ||
+        (!placeholder && Boolean(expected) && buttonText.includes(expected));
     }
     if (kind === "file") return Boolean(el.files?.length);
     return M.norm(el.value) === want || M.norm(el.value).includes(want);
@@ -278,35 +324,57 @@
     const rule = field.rule ?? M.matchRule(el, label, RULES);
 
     if (rule) {
-      let value = rule.value(profile);
+      let value = rule.value(profile, el, label);
 
       // Documents are handled specially
       if (value === "__RESUME__" || value === "__COVER_LETTER__") {
         const wantKind = value === "__RESUME__" ? "resume" : "coverLetter";
         const docs = profile.documents ?? [];
         const doc = docs.find((d) => d.kind === wantKind && d.isDefault) || docs.find((d) => d.kind === wantKind);
-        if (!doc) return { key: rule.key, status: "no-value" };
+        if (!doc) return { key: rule.key, status: "unmatched", label };
         if (kind === "file") {
           return { key: rule.key, status: M.setFileValue(el, doc) ? "filled" : "failed" };
         }
         return { key: rule.key, status: "skipped" };
       }
 
-      if (!value) return { key: rule.key, status: "no-value" };
+      if (!value) {
+        // A missing profile value should still get a chance to use a saved
+        // answer for this exact question.
+        if (settings?.reuseSavedResponses !== false && kind !== "file") {
+          const saved = findSavedAnswer(label);
+          if (saved?.answer) {
+            const savedDone = await fillAndVerify(field, saved.answer, null);
+            if (savedDone) return { key: "saved-answer", status: "filled", label, fromMemory: true };
+          }
+        }
+        return { key: rule.key, status: "unmatched", label };
+      }
 
       if (kind === "file") return { key: rule.key, status: "failed", label };
       const done = await fillAndVerify(field, value, rule);
-      return { key: rule.key, status: done ? "filled" : "failed", label };
+      if (done) return { key: rule.key, status: "filled", label };
+
+      // A profile value can be semantically correct but not be one of this
+      // portal's exact choices (for example "Master's Degree" vs "Master of
+      // Science"). If the user has already answered this same question on
+      // another portal, prefer that saved answer over guessing.
+      if (settings?.reuseSavedResponses !== false) {
+        const saved = findSavedAnswer(label);
+        if (saved?.answer && saved.answer !== value) {
+          const savedDone = await fillAndVerify(field, saved.answer, null);
+          if (savedDone) return { key: "saved-answer", status: "filled", label, fromMemory: true };
+        }
+      }
+      return { key: rule.key, status: "failed", label };
     }
 
-    // 2. No rule — try a saved answer for this exact question
+    // 2. No profile rule — try a saved answer for this exact question
     if (settings?.reuseSavedResponses !== false) {
       const saved = findSavedAnswer(label);
-      if (saved?.answer) {
-        if (kind !== "file") {
-          const done = await fillAndVerify(field, saved.answer, null);
-          if (done) return { key: "saved-answer", status: "filled", label, fromMemory: true };
-        }
+      if (saved?.answer && kind !== "file") {
+        const done = await fillAndVerify(field, saved.answer, null);
+        if (done) return { key: "saved-answer", status: "filled", label, fromMemory: true };
       }
     }
 
@@ -360,11 +428,8 @@
 
     if (!targets.length) return 0;
 
-    overlay.show({
-      tone: "busy",
-      title: `Answering ${targets.length} more question${targets.length === 1 ? "" : "s"}…`,
-      body: "Drawn from your profile. Read them before you submit.",
-    });
+    // AI drafting is also silent; drafted fields are visibly marked on the
+    // form itself so there is no popup covering the application.
 
     let done = 0;
     for (const field of targets) {
@@ -420,7 +485,14 @@
     state.stopRequested = false;
     state.manualSessionActive = true;
 
-    const session = state.session ?? (await loadSession());
+    // Always refresh on an explicit fill. Profile edits and saved answers are
+    // frequently made in the dashboard immediately before applying, and the
+    // old cached session could keep stale data for up to 30 minutes.
+    const session = await loadSession(true);
+    if (session?.profile) {
+      state.profile = null;
+      state.scoring = null;
+    }
     if (!session?.profile) {
       if (manual) overlay.show({ tone: "warn", title: "Not connected", body: "Open the Zapply popup and pair with your dashboard." });
       return { ok: false, error: "not-connected" };
@@ -436,9 +508,7 @@
 
     // Premium: which of the user's profiles actually fits this posting?
     if (!state.profile) {
-      if (settings.showOverlay !== false && session.premium && (session.profiles?.length ?? 0) > 1) {
-        overlay.show({ tone: "busy", title: "Matching your profiles to this role…" });
-      }
+      // Profile selection is silent; only unresolved fields are surfaced later.
       const picked = await pickProfile(session, meta);
       state.profile = picked.profile;
       state.scoring = picked.scoring;
@@ -450,9 +520,8 @@
     const result = { filled: 0, failed: 0, unmatched: 0, detected: fields.length, keys: [] };
     state.unmatched = [];
 
-    if (settings.showOverlay !== false) {
-      overlay.show({ tone: "busy", title: "Filling this application…", body: `${fields.length} fields found` });
-    }
+    // Autofill runs silently. A warning is shown only if safe matching leaves
+    // a field unresolved after the retry/validation pass.
 
     for (const field of fields) {
       if (state.stopRequested) break;
@@ -480,6 +549,44 @@
 
       if (delay) await sleep(delay);
     }
+
+    // Some React/Workday/Oracle forms mount dependent fields only after an
+    // earlier answer changes the page. Rescan twice so those newly-created
+    // controls receive the same profile/saved-answer pass.
+    for (let pass = 0; pass < 2; pass++) {
+      await sleep(180);
+      const fresh = collectFields(adapter);
+      const known = new Set(fields.map((f) => f.el));
+      const added = fresh.filter((f) => !known.has(f.el));
+      if (!added.length) break;
+      fields.push(...added);
+      result.detected = fields.length;
+
+      for (const field of added) {
+        if (state.stopRequested) break;
+        if (M.hasValue(field.el) && field.kind !== "checkbox") continue;
+        try {
+          const outcome = await fillField(field, profile, settings);
+          if (outcome.status === "filled") {
+            result.filled++;
+            result.keys.push(outcome.key);
+            flash(field.el);
+          } else if (outcome.status === "failed") {
+            result.failed++;
+          } else if (outcome.status === "unmatched") {
+            state.unmatched.push(field);
+            mark(field.el);
+          }
+        } catch {
+          result.failed++;
+          state.unmatched.push(field);
+          mark(field.el);
+        }
+        if (delay) await sleep(delay);
+      }
+    }
+
+    result.unmatched = state.unmatched.length;
 
     // A failed interaction is not an answered field. Put it back into the
     // retry/AI queue instead of counting it as merely "failed" and moving on.
@@ -552,26 +659,23 @@
 
     watchUnmatched();
 
-    if (settings.showOverlay !== false) {
+    // Do not show a success/status popup after correct profile or saved-answer
+    // fills. Only surface a warning when something genuinely needs the user.
+    if (settings.showOverlay !== false && result.unmatched) {
       const scoreLine = state.scoring
-        ? `Using "${state.scoring.label}" — ${state.scoring.score}% match. `
+        ? `Profile match: ${state.scoring.score}%. `
         : "";
-      const draftLine = result.drafted
-        ? `${result.drafted} answer${result.drafted === 1 ? "" : "s"} drafted for you to read. `
-        : "";
-
       overlay.show({
-        tone: result.unmatched ? "partial" : "done",
-        title: result.unmatched
-          ? `Filled ${result.filled} — ${result.unmatched} left for you`
-          : `Filled ${result.filled} fields`,
+        tone: "partial",
+        title: `${result.unmatched} field${result.unmatched === 1 ? "" : "s"} need your answer`,
         body:
-          scoreLine + draftLine +
-          (result.unmatched
-            ? `${result.validationErrors?.length ? `${result.validationErrors.length} validation message${result.validationErrors.length === 1 ? "" : "s"} detected. ` : ""}The highlighted questions need your answer. Type once and Zapply remembers.`
-            : "Review it, then submit."),
-        autoHide: !result.unmatched && !result.drafted,
+          scoreLine +
+          `${result.validationErrors?.length ? `${result.validationErrors.length} validation message${result.validationErrors.length === 1 ? "" : "s"} detected. ` : ""}` +
+          "The highlighted questions were not safely answered.",
+        autoHide: false,
       });
+    } else {
+      overlay.hide();
     }
 
     if (!state.stopRequested && settings.autoPilot && adapter.nextButton) await advance(adapter);
@@ -857,8 +961,8 @@
   /*  Boot                                                               */
   /* ================================================================== */
 
-  async function loadSession() {
-    const res = await send({ type: "ZAPPLY_GET_SESSION" });
+  async function loadSession(force = false) {
+    const res = await send({ type: "ZAPPLY_GET_SESSION", force });
     if (res?.ok) state.session = res.data;
     return state.session;
   }

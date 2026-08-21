@@ -36,7 +36,7 @@ export default function SettingsPanel({
   initial, email, premium = false,
 }: { initial: Settings; email: string; premium?: boolean }) {
   const [s, setS] = useState<Settings>({
-    autofillOnLoad: false, autoPilot: false, showOverlay: true, trackAutomatically: true,
+    autofillOnLoad: false, autoPilot: false, showOverlay: false, trackAutomatically: true,
     reuseSavedResponses: true, aiAnswers: false, fillDelayMs: 120, dailyGoal: 10,
     excludedDomains: [], ...initial,
   });

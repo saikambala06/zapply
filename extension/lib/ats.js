@@ -50,9 +50,42 @@
       quirks: { slowDropdowns: true },
     },
 
+    oraclehcm: {
+      label: "Oracle HCM",
+      test: () =>
+        /oraclecloud\.com|oracle\.com/.test(location.hostname) ||
+        /CandidateExperience|hcmUI/i.test(location.pathname),
+      formSelector: "form, [role='main'], [class*='application']",
+      jobTitle: () => text("h1, [data-automation-id*='jobPostingHeader'], [class*='job-title']") || document.title,
+      company: () => attr("meta[property='og:site_name']", "content") || location.hostname.split(".")[0],
+      nextButton: "button[data-automation-id*='next'], button[aria-label*='Next'], button[type='submit']",
+      submitButton: "button[data-automation-id*='submit'], button[type='submit']",
+      quirks: { slowDropdowns: true, multiStep: true, dropdownDelay: 900 },
+    },
+
+    sapSuccessFactors: {
+      label: "SAP SuccessFactors",
+      test: () => /successfactors\.(com|eu)|jobs\.sap/.test(location.hostname),
+      formSelector: "form, [role='main'], [class*='application']",
+      jobTitle: () => text("h1, .jobTitle") || document.title,
+      submitButton: "button[type='submit'], input[type='submit']",
+      quirks: { multiStep: true, slowDropdowns: true, dropdownDelay: 900 },
+    },
+
+    ukg: {
+      label: "UKG / UltiPro",
+      test: () => /ultipro\.com|ukg\.com|recruiting\.ultipro/.test(location.hostname),
+      formSelector: "form, [role='main'], [class*='application']",
+      jobTitle: () => text("h1, [class*='job-title']") || document.title,
+      submitButton: "button[type='submit'], input[type='submit']",
+      quirks: { multiStep: true, slowDropdowns: true, dropdownDelay: 900 },
+    },
+
     workday: {
       label: "Workday",
-      test: () => /myworkdayjobs\.com|workday\.com/.test(location.hostname) || Boolean(document.querySelector("[data-automation-id]")),
+      test: () =>
+        /myworkdayjobs\.com|workday\.com/.test(location.hostname) ||
+        Boolean(document.querySelector("[data-automation-id='applyFlowPage'], [data-automation-id='bottom-navigation-next-button'], [data-automation-id='questionnaire']")),
       formSelector: "[data-automation-id='applyFlowPage'], form, [role='main']",
       jobTitle: () =>
         text("[data-automation-id='jobPostingHeader']") ||
@@ -165,15 +198,6 @@
       jobTitle: () => text("h1, .jobTitle") || document.title,
       quirks: { multiStep: true, slowDropdowns: true },
       submitButton: "button[type='submit'], input[type='submit']",
-    },
-
-    oraclehcm: {
-      label: "Oracle HCM",
-      test: () => /oraclecloud\.com|taleo|oracle\.com\/.*recruiting/.test(location.hostname + location.pathname),
-      formSelector: "form",
-      jobTitle: () => text("h1") || document.title,
-      quirks: { multiStep: true },
-      submitButton: "button[type='submit']",
     },
 
     adp: {

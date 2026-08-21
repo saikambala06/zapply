@@ -4,7 +4,7 @@ const SettingsSchema = new Schema(
   {
     autofillOnLoad: { type: Boolean, default: false },     // fill as soon as a form is detected
     autoPilot: { type: Boolean, default: false },          // fill + advance + submit
-    showOverlay: { type: Boolean, default: true },         // the status pill on the page
+    showOverlay: { type: Boolean, default: false },         // the status pill on the page
     trackAutomatically: { type: Boolean, default: true },  // log applications on submit
     reuseSavedResponses: { type: Boolean, default: true },
     aiAnswers: { type: Boolean, default: false },          // Premium: generate unknown answers

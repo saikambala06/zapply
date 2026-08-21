@@ -36,6 +36,31 @@
   const latestJob = (p) => (p?.experience ?? [])[0] ?? {};
   const latestSchool = (p) => (p?.education ?? [])[0] ?? {};
 
+  const datePart = (raw, part) => {
+    const value = String(raw ?? "").trim();
+    if (!value) return null;
+    const m = value.match(/^(\d{4})-(\d{1,2})(?:-(\d{1,2}))?/);
+    if (!m) return value;
+    if (part === "year") return m[1];
+    if (part === "month") return String(m[2]).padStart(2, "0");
+    if (part === "monthName") {
+      const names = ["January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December"];
+      return names[Math.max(0, Number(m[2]) - 1)] || null;
+    }
+    return value;
+  };
+
+  const dateForField = (raw, el) => {
+    const type = (el?.type || "").toLowerCase();
+    if (type === "month") return datePart(raw, "month");
+    if (type === "date") return raw ? String(raw).slice(0, 10) : null;
+    return raw;
+  };
+
+  const dateMonth = (raw) => datePart(raw, "monthName") || datePart(raw, "month");
+  const dateYear = (raw) => datePart(raw, "year");
+
   const fullName = (p) =>
     [P(p).firstName, P(p).lastName].filter(Boolean).join(" ") || null;
 
@@ -109,6 +134,22 @@
       type: ["text", "select", "radio"],
       value: (p) => P(p).pronouns,
     },
+    {
+      key: "dateOfBirth",
+      weight: 11,
+      match: [/\b(date\s*of\s*birth|birth\s*date|dob)\b/i],
+      deny: [/graduat|start|end|employment/i],
+      type: ["text", "date", "month"],
+      value: (p, el) => dateForField(P(p).dateOfBirth, el),
+    },
+    {
+      key: "nationality",
+      weight: 10,
+      match: [/\b(nationality|citizenship|citizen(ship)?\s*status)\b/i],
+      deny: [/work\s*authorization|sponsor|visa/i],
+      type: ["text", "select"],
+      value: (p) => P(p).nationality,
+    },
 
     /* ---------------- Contact ---------------- */
     {
@@ -145,7 +186,7 @@
       key: "phoneType",
       weight: 10,
       match: [/\bphone\s*(type|device)\b/i],
-      type: ["select", "radio"],
+      type: ["select", "radio", "text"],
       value: (p) => P(p).phoneType || "Mobile",
       options: ["mobile", "cell", "home", "personal"],
     },
@@ -255,6 +296,107 @@
       value: (p) => latestJob(p).title,
     },
     {
+      key: "employmentType",
+      weight: 12,
+      match: [/\bemployment\s*(type|status)\b/i, /\bjob\s*(type|status)\b/i, /\bwork\s*(type|status)\b/i],
+      deny: [/current|previous|eligibility|authorized/i],
+      type: ["text", "select", "radio"],
+      value: (p) => latestJob(p).employmentType,
+    },
+    {
+      key: "experienceLocation",
+      weight: 12,
+      match: [
+        /\b(experience|employment|work\s*history|job\s*history)\b.*\blocation\b/i,
+        /\blocation\b.*\b(experience|employment|work\s*history|job\s*history)\b/i,
+      ],
+      type: ["text", "select"],
+      value: (p) => latestJob(p).location,
+    },
+    {
+      key: "experienceLocationType",
+      weight: 12,
+      match: [
+        /\b(work|job|employment|experience)\b.*\b(location|workplace)\s*(type|mode|arrangement)\b/i,
+        /\b(remote|hybrid|on[- ]site)\b.*\b(work|employment|location)\b/i,
+      ],
+      type: ["text", "select", "radio"],
+      value: (p) => latestJob(p).locationType,
+      options: {
+        "On-site": ["on-site", "onsite", "office"],
+        Remote: ["remote", "work from home", "wfh"],
+        Hybrid: ["hybrid"],
+      },
+    },
+    {
+      key: "responsibilities",
+      weight: 9,
+      match: [/\b(responsibilit(?:y|ies)|what\s+you\s+did|duties|job\s+duties)\b/i],
+      deny: [/reference|emergency/i],
+      type: ["text", "textarea"],
+      value: (p) => latestJob(p).description,
+    },
+    {
+      key: "experienceStartDate",
+      weight: 12,
+      match: [
+        /\b(experience|employment|work\s*history|job\s*history)\b.*\bstart\b/i,
+        /\bstart\b.*\b(experience|employment|work\s*history|job\s*history)\b/i,
+      ],
+      type: ["text", "date", "month"],
+      value: (p, el) => dateForField(latestJob(p).startDate, el),
+    },
+    {
+      key: "experienceEndDate",
+      weight: 12,
+      match: [
+        /\b(experience|employment|work\s*history|job\s*history)\b.*\bend\b/i,
+        /\bend\b.*\b(experience|employment|work\s*history|job\s*history)\b/i,
+      ],
+      type: ["text", "date", "month"],
+      value: (p, el) => dateForField(latestJob(p).endDate, el),
+    },
+    {
+      key: "experienceStartMonth",
+      weight: 13,
+      match: [/\bstart\s*date\s*month\b/i, /\bstart\s*month\b/i],
+      deny: [/education|school|college|university/i],
+      type: ["select", "text"],
+      value: (p) => dateMonth(latestJob(p).startDate),
+    },
+    {
+      key: "experienceStartYear",
+      weight: 13,
+      match: [/\bstart\s*date\s*year\b/i, /\bstart\s*year\b/i],
+      deny: [/education|school|college|university/i],
+      type: ["select", "text"],
+      value: (p) => dateYear(latestJob(p).startDate),
+    },
+    {
+      key: "experienceEndMonth",
+      weight: 13,
+      match: [/\bend\s*date\s*month\b/i, /\bend\s*month\b/i],
+      deny: [/education|school|college|university/i],
+      type: ["select", "text"],
+      value: (p) => dateMonth(latestJob(p).endDate),
+    },
+    {
+      key: "experienceEndYear",
+      weight: 13,
+      match: [/\bend\s*date\s*year\b/i, /\bend\s*year\b/i],
+      deny: [/education|school|college|university/i],
+      type: ["select", "text"],
+      value: (p) => dateYear(latestJob(p).endDate),
+    },
+    {
+      key: "currentJob",
+      weight: 12,
+      match: [/\bcurrently\s*(work|employed)\b/i, /\bcurrent\s*(job|role|position)\b/i, /\bthis\s*is\s*my\s*current\s*(job|role)\b/i],
+      type: ["checkbox", "radio", "select"],
+      value: (p) => latestJob(p).current ? "Yes" : "No",
+      options: { Yes: ["yes", "currently", "current", "true"], No: ["no", "not current", "false"] },
+    },
+    {
       key: "yearsExperience",
       weight: 9,
       match: [/\byears?\s*(of\s*)?(relevant\s*|professional\s*|work\s*)?experience\b/i, /\bhow many years\b/i, /\bexperience\s*\(years\)/i],
@@ -287,6 +429,13 @@
       value: (p) => latestSchool(p).fieldOfStudy,
     },
     {
+      key: "educationLocation",
+      weight: 8,
+      match: [/\b(school|college|university|education)\b.*\blocation\b/i, /\blocation\b.*\b(school|college|university)\b/i],
+      type: ["text", "select"],
+      value: (p) => latestSchool(p).location,
+    },
+    {
       key: "gpa",
       weight: 11,
       match: [/\bgpa\b/i, /\bgrade\s*point\b/i],
@@ -298,7 +447,49 @@
       weight: 9,
       match: [/\b(graduation|grad)\s*(date|year|month)\b/i, /\b(expected|anticipated)\s*graduation\b/i],
       type: ["text", "date", "month", "select"],
-      value: (p) => latestSchool(p).endDate,
+      value: (p, el) => dateForField(latestSchool(p).endDate, el),
+    },
+    {
+      key: "educationStartMonth",
+      weight: 13,
+      match: [
+        /\b(education|school|college|university)\b.*\b(start|begin)\w*\s*date\s*month\b/i,
+        /\b(start|begin)\w*\s*date\s*month\b.*\b(education|school|college|university)\b/i,
+      ],
+      type: ["select", "text"],
+      value: (p) => dateMonth(latestSchool(p).startDate),
+    },
+    {
+      key: "educationStartYear",
+      weight: 13,
+      match: [
+        /\b(education|school|college|university)\b.*\b(start|begin)\w*\s*date\s*year\b/i,
+        /\b(start|begin)\w*\s*date\s*year\b.*\b(education|school|college|university)\b/i,
+      ],
+      type: ["select", "text"],
+      value: (p) => dateYear(latestSchool(p).startDate),
+    },
+    {
+      key: "educationEndMonth",
+      weight: 13,
+      match: [
+        /\b(education|school|college|university)\b.*\bend\s*date\s*month\b/i,
+        /\bend\s*date\s*month\b.*\b(education|school|college|university)\b/i,
+        /\bend\s*\(?(or\s+expected)?\)?\s*date\s*month\b.*\b(education|school|college|university)\b/i,
+      ],
+      type: ["select", "text"],
+      value: (p) => dateMonth(latestSchool(p).endDate),
+    },
+    {
+      key: "educationEndYear",
+      weight: 13,
+      match: [
+        /\b(education|school|college|university)\b.*\bend\s*date\s*year\b/i,
+        /\bend\s*date\s*year\b.*\b(education|school|college|university)\b/i,
+        /\bend\s*\(?(or\s+expected)?\)?\s*date\s*year\b.*\b(education|school|college|university)\b/i,
+      ],
+      type: ["select", "text"],
+      value: (p) => dateYear(latestSchool(p).endDate),
     },
 
     /* ---------------- Work eligibility ---------------- */
@@ -355,9 +546,9 @@
       key: "startDate",
       weight: 10,
       match: [/\b(available|earliest|possible|potential)\s*(to\s*)?start\s*(date)?\b/i, /\bwhen\s*can\s*you\s*start\b/i, /\bstart\s*date\b/i, /\bavailability\s*date\b/i],
-      deny: [/employment\s*start|previous|current\s*job/i],
+      deny: [/employment\s*start|previous|current\s*job|experience|employment|work\s*history|education|school|college|university/i],
       type: ["text", "date", "month"],
-      value: (p) => W(p).availableStartDate,
+      value: (p, el) => dateForField(W(p).availableStartDate, el),
     },
     {
       key: "noticePeriod",
@@ -409,6 +600,22 @@
       match: [/\bdriver'?s?\s*licen[cs]e\b/i],
       type: ["select", "radio", "text"],
       value: (p) => W(p).driversLicense,
+    },
+    {
+      key: "willingToDrugTest",
+      weight: 11,
+      match: [/\b(willing|agree|consent).*\bdrug\s*test\b/i, /\bdrug\s*test\b/i],
+      type: ["select", "radio"],
+      value: (p) => W(p).willingToDrugTest || "Yes",
+      options: { Yes: ["yes", "agree", "consent", "true"], No: ["no", "do not", "decline", "false"] },
+    },
+    {
+      key: "willingToBackgroundCheck",
+      weight: 11,
+      match: [/\b(willing|agree|consent).*\bbackground\s*(check|screening)\b/i, /\bbackground\s*(check|screening)\b/i],
+      type: ["select", "radio"],
+      value: (p) => W(p).willingToBackgroundCheck || "Yes",
+      options: { Yes: ["yes", "agree", "consent", "true"], No: ["no", "do not", "decline", "false"] },
     },
 
     /* ---------------- Compensation ---------------- */
@@ -500,6 +707,21 @@
       match: [/\bcover\s*letter\b/i, /\bmotivation\s*letter\b/i],
       type: ["file", "textarea"],
       value: () => "__COVER_LETTER__",
+    },
+    {
+      key: "certifications",
+      weight: 8,
+      match: [/\b(certification|certifications|professional\s*license|licen[cs]e)\b/i],
+      deny: [/driver'?s?/i],
+      type: ["text", "textarea"],
+      value: (p) => (p?.certifications ?? []).join(", "),
+    },
+    {
+      key: "languages",
+      weight: 8,
+      match: [/\b(language|languages|spoken\s*languages|language\s*proficiency)\b/i],
+      type: ["text", "textarea"],
+      value: (p) => (P(p).languages ?? []).join(", "),
     },
     {
       key: "summary",

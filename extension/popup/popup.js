@@ -174,7 +174,7 @@ async function refreshPageStatus() {
     }
 
     if (res.lastRun) {
-      $("stat-fields").textContent = res.lastRun.filled;
+      $("stat-fields").textContent = res.lastRun.unmatched || res.lastRun.drafted ? String(res.lastRun.filled) : "—";
       const detail = [
         res.ats && `Detected: ${res.ats}`,
         res.lastRun.matchScore != null && `${res.lastRun.profileLabel} · ${res.lastRun.matchScore}% match`,
@@ -185,9 +185,9 @@ async function refreshPageStatus() {
       setStatus(
         res.lastRun.unmatched ? "warn" : "ready",
         res.lastRun.unmatched
-          ? `${res.lastRun.filled} filled · ${res.lastRun.unmatched} need you`
-          : `${res.lastRun.filled} fields filled`,
-        detail
+          ? `${res.lastRun.unmatched} field${res.lastRun.unmatched === 1 ? "" : "s"} need you`
+          : (res.lastRun.drafted ? "Review drafted answers" : "Ready to review"),
+        res.lastRun.unmatched ? detail : (res.lastRun.drafted ? detail : "Profile and saved answers applied.")
       );
     } else if (res.isApplication) {
       setStatus("ready", "Application detected", res.ats ? `Detected: ${res.ats}` : "Ready to fill.");
@@ -227,18 +227,21 @@ $("fill-btn").addEventListener("click", async () => {
       setStatus("warn", "Couldn't fill this page", "Reload it and try again.");
       return;
     }
-    $("stat-fields").textContent = res.data.filled;
+    $("stat-fields").textContent = res.data.unmatched || res.data.drafted ? String(res.data.filled) : "—";
+    const needsReview = Boolean(res.data.unmatched || res.data.drafted);
     setStatus(
       res.data.unmatched ? "warn" : "ready",
       res.data.unmatched
-        ? `${res.data.filled} filled · ${res.data.unmatched} need you`
-        : `${res.data.filled} fields filled`,
-      [
-        `${res.data.detected} fields in ${res.data.durationMs}ms`,
-        res.data.matchScore != null && `${res.data.matchScore}% match`,
-        res.data.drafted && `${res.data.drafted} drafted`,
-      ].filter(Boolean).join(" · ")
+        ? `${res.data.unmatched} field${res.data.unmatched === 1 ? "" : "s"} need you`
+        : (res.data.drafted ? "Review drafted answers" : "Ready to review"),
+      res.data.unmatched
+        ? [
+            `${res.data.detected} fields checked`,
+            res.data.matchScore != null && `${res.data.matchScore}% match`,
+          ].filter(Boolean).join(" · ")
+        : (res.data.drafted ? "AI drafted answers are marked on the form." : "Profile and saved answers applied.")
     );
+    if (!needsReview) setTimeout(() => window.close(), 120);
   });
 });
 
