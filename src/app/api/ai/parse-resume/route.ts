@@ -1,12 +1,13 @@
 import { requireUser } from "@/lib/auth";
 import { ok, fail, handler } from "@/lib/api";
-import { aiEnabled, askAIJSON, parseResumeDocument, AI_SETUP_HINT } from "@/lib/ai";
+import { askAIJSONFast, parseResumeDocument } from "@/lib/ai";
 import { normalizeParsedResume } from "@/lib/profile-shape";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+export const maxDuration = 55;
+export const preferredRegion = "iad1";
 
-const MAX_BYTES = 12 * 1024 * 1024;
+const MAX_BYTES = 4 * 1024 * 1024;
 
 const SHAPE = `{"personal":{"firstName":"","middleName":"","lastName":"","preferredName":"","email":"","phone":"","phoneCountryCode":"","phoneType":"Mobile","city":"","state":"","zip":"","country":"","address":"","addressLine2":"","nationality":"","citizenship":"","languages":[]},
  "summary":"",
@@ -26,29 +27,38 @@ const SYSTEM =
 /**
  * Accepts the resume file itself (multipart) or pre-extracted text (JSON).
  *
- * Text is extracted server-side first (unpdf for PDF, mammoth for DOCX) because
- * Groq's models take text only. Nothing is written to the profile - the UI shows
+ * Text is extracted server-side first (unpdf for PDF, mammoth for DOCX) before
+ * Gemini structures it. Nothing is written to the profile - the UI shows
  * the result for the user to accept.
  */
 export const POST = handler(async (req: Request) => {
   await requireUser(req as any);
-  if (!aiEnabled() && !process.env.GEMINI_API_KEY) {
-    return fail("Resume parsing needs an AI provider. Configure GROQ_API_KEY/AI_API_KEY, or GEMINI_API_KEY for OCR/vision parsing.", 503);
-  }
-
   const contentType = req.headers.get("content-type") ?? "";
 
   // JSON body: the caller already has the text.
   if (contentType.includes("application/json")) {
     const { text } = await req.json();
     if (!text || String(text).trim().length < 60) {
-      return fail("We couldn't read enough text from that file. Try a text-based PDF, or paste the text.", 400);
+      return fail("We couldn't read enough text from that file. Try a PDF, DOC, DOCX, RTF or TXT resume.", 400);
     }
-    const parsed = await askAIJSON<Record<string, unknown>>(
-      SYSTEM,
-      `Resume text:\n"""\n${String(text).slice(0, 30000)}\n"""\n\nReturn JSON in exactly this shape:\n${SHAPE}`,
-      3000
-    );
+    const prompt = `Resume text:
+"""
+${String(text)}
+"""
+
+Return JSON in exactly this shape:
+${SHAPE}`;
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = await askAIJSONFast<Record<string, unknown>>(SYSTEM, prompt, 3500);
+    } catch (err) {
+      // Keep JSON/text callers resilient too: the browser may submit already
+      // extracted resume text instead of the original file. Never let a bad
+      // model response turn into a 500/504 when we can still recover locally.
+      console.error("[parse-resume:text-fallback] Gemini failed; using local extraction", err);
+      const { fallbackParseResumeText } = await import("@/lib/ai");
+      parsed = fallbackParseResumeText(String(text));
+    }
     return ok(normalizeParsedResume(parsed));
   }
 
@@ -56,7 +66,7 @@ export const POST = handler(async (req: Request) => {
   const form = await req.formData();
   const file = form.get("file") as File | null;
   if (!file) return fail("Choose a resume file to read.", 400);
-  if (file.size > MAX_BYTES) return fail("That file is over 12 MB. Compress it and try again.", 413);
+  if (file.size > MAX_BYTES) return fail("That resume is over 4 MB. Please export/compress it to a smaller PDF or DOCX and try again.", 413);
 
   const buffer = Buffer.from(await file.arrayBuffer());
   try {
@@ -76,9 +86,13 @@ export const POST = handler(async (req: Request) => {
     const message = String(err?.message || "We couldn't parse that resume.");
     // Bad/corrupt/unsupported files are client-fixable; don't turn them into
     // opaque 500 errors. AI/provider errors are allowed to bubble to handler().
-    if (/couldn't read this (pdf|docx|legacy doc)|unsupported resume format|almost no readable text|password protected|encrypted|corrupted/i.test(message)) {
+    if (/couldn't read this (pdf|docx|legacy doc|rtf)|unsupported resume format|almost no readable text|password protected|encrypted|corrupted/i.test(message)) {
       return fail(message, 422);
     }
-    throw err;
+    if (/AI features need|provider rejected|authentication failed|Gemini|AI request failed|AI provider is|AI provider returned|AI request didn't go through|rate limiting|API key|invalid api|unauthorized|forbidden/i.test(message)) {
+      return fail(message, 503);
+    }
+    console.error("[parse-resume] unexpected parser error", err);
+    return fail("We could not parse that resume. Please try the upload again with the original file.", 422);
   }
 });

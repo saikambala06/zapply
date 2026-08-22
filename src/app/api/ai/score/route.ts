@@ -53,5 +53,5 @@ export const POST = handler(async (req: NextRequest) => {
   );
 
   const scores = (result.scores ?? []).sort((a: Scored, b: Scored) => b.score - a.score);
-  return ok({ best: scores[0], scores, summary: result.summary, engine: "groq" });
+  return ok({ best: scores[0], scores, summary: result.summary, engine: "gemini" });
 });

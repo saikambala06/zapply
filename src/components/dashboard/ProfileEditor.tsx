@@ -220,19 +220,32 @@ export default function ProfileEditor({
     setParsing(true);
     setError("");
     try {
-      // Uploading from the toolbar should also store the file, so it gets
-      // attached to applications that ask for one — not just read and discarded.
-      if (alsoAttach) {
-        const attached = await uploadResume(file);
-        if (!attached) throw new Error("The resume was parsed but could not be saved to your profile. Please retry the upload.");
+      if (file.size > 4 * 1024 * 1024) {
+        throw new Error("That resume is over 4 MB. Please export/compress it to a smaller file and try again.");
       }
-
+      // Parse first; attachment storage is intentionally done after successful
+      // parsing so a slow MongoDB write cannot make the AI step appear stuck.
       const fd = new FormData();
       fd.append("file", file);
-      const res = await fetch("/api/ai/parse-resume", { method: "POST", body: fd });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error);
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 90_000);
+      let res: Response;
+      try {
+        res = await fetch("/api/ai/parse-resume", { method: "POST", body: fd, signal: controller.signal });
+      } catch (err: any) {
+        if (err?.name === "AbortError") throw new Error("Resume parsing took too long. Please retry once. Large or scanned resumes can take longer to process.");
+        throw err;
+      } finally {
+        window.clearTimeout(timeout);
+      }
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.error || `Resume parsing failed (${res.status}). Please try again.`);
+      if (!json?.data) throw new Error("Resume parsing returned no profile data. Please try again.");
       setParsed(json.data);
+      if (alsoAttach) {
+        const attached = await uploadResume(file);
+        if (!attached) throw new Error("The resume was parsed successfully, but the file attachment could not be saved. Retry the attachment without re-parsing.");
+      }
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -294,6 +307,10 @@ export default function ProfileEditor({
 
   async function uploadResume(file: File, kind = "resume") {
     try {
+      if (file.size > 3 * 1024 * 1024) {
+        setError("That resume is over 4 MB. Please export/compress it to a smaller file and try again.");
+        return false;
+      }
       const fd = new FormData();
       fd.append("file", file);
       fd.append("profileId", p._id);
@@ -517,7 +534,7 @@ export default function ProfileEditor({
               <label className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-line bg-canvas px-6 py-10 text-center transition hover:border-brand-300 hover:bg-brand-50">
                 <Upload className="h-6 w-6 text-brand-500" />
                 <span className="mt-3 text-[15px] font-semibold">Upload your resume</span>
-                <span className="mt-1 text-[13px] text-ink-soft">PDF, DOC, DOCX, TXT, PNG, JPG or WEBP · up to 12 MB</span>
+                <span className="mt-1 text-[13px] text-ink-soft">PDF, DOC, DOCX, TXT, PNG, JPG or WEBP · up to 3 MB</span>
                 <span className="mt-1 text-[12px] text-ink-faint">Attached automatically to applications that ask for a file</span>
                 <input
                   type="file"
