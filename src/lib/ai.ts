@@ -16,8 +16,9 @@ const DEFAULT_BASE_URL = "https://api.groq.com/openai/v1";
 const DEFAULT_MODEL = "openai/gpt-oss-120b";
 
 function apiKey() {
-  // This project uses GROQ_API_KEY as its only text-AI credential.
-  return process.env.GROQ_API_KEY || "";
+  // GROQ_API_KEY is the documented name; AI_API_KEY is the generic fallback so
+  // a different provider doesn't force a misleading variable name.
+  return process.env.GROQ_API_KEY || process.env.AI_API_KEY || "";
 }
 
 const baseUrl = () => (process.env.AI_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, "");
@@ -29,7 +30,7 @@ export function aiEnabled() {
 
 /** What the UI should tell a user when the key is missing. */
 export const AI_SETUP_HINT =
-  "AI features need GROQ_API_KEY. Scanned PDF/image OCR also requires GOOGLE_API_KEY for Gemini.";
+  "AI features need GROQ_API_KEY/AI_API_KEY. For scanned PDF/image OCR, also configure GEMINI_API_KEY.";
 
 type Message = { role: "system" | "user" | "assistant"; content: string };
 
@@ -38,7 +39,6 @@ type ChatOptions = {
   temperature?: number;
   json?: boolean;
   retries?: number;
-  timeoutMs?: number;
 };
 
 /**
@@ -49,7 +49,7 @@ type ChatOptions = {
  * shouldn't surface to the user as a hard failure.
  */
 async function chat(messages: Message[], opts: ChatOptions = {}): Promise<string> {
-  const { maxTokens = 1024, temperature = 0.4, json = false, retries = 2, timeoutMs = 20000 } = opts;
+  const { maxTokens = 1024, temperature = 0.4, json = false, retries = 2 } = opts;
 
   if (!aiEnabled()) throw new Error(AI_SETUP_HINT);
 
@@ -71,14 +71,14 @@ async function chat(messages: Message[], opts: ChatOptions = {}): Promise<string
   for (let attempt = 0; attempt <= retries; attempt++) {
     let res: Response;
     try {
-      res = await fetchWithTimeout(`${baseUrl()}/chat/completions`, {
+      res = await fetch(`${baseUrl()}/chat/completions`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${apiKey()}`,
         },
         body: JSON.stringify(body),
-      }, timeoutMs);
+      });
     } catch (err: any) {
       lastError = `Couldn't reach the AI provider (${err?.message ?? "network error"}).`;
       await backoff(attempt);
@@ -97,7 +97,7 @@ async function chat(messages: Message[], opts: ChatOptions = {}): Promise<string
     const detail = await res.text().catch(() => "");
 
     if (res.status === 401 || res.status === 403) {
-      throw new Error("Groq authentication failed (HTTP 401/403). Verify GROQ_API_KEY in Vercel and redeploy.");
+      throw new Error("The AI provider rejected the API key. Check GROQ_API_KEY.");
     }
     if (res.status === 404) {
       throw new Error(`The model "${model()}" isn't available on this provider. Set AI_MODEL to one that is.`);
@@ -151,19 +151,6 @@ export async function askAIJSON<T>(system: string, user: string, maxTokens = 150
   return parseJson<T>(raw);
 }
 
-/** Fast JSON completion used by resume parsing so provider failure cannot consume
- * the entire Vercel function window before the Google fallback is attempted. */
-export async function askAIJSONFast<T>(system: string, user: string, maxTokens = 4500): Promise<T> {
-  const raw = await chat(
-    [
-      { role: "system", content: `${system}\n\nRespond with a single valid JSON object and nothing else. No prose, no markdown fences.` },
-      { role: "user", content: user },
-    ],
-    { maxTokens, json: true, temperature: 0.2, retries: 0, timeoutMs: 14000 }
-  );
-  return parseJson<T>(raw);
-}
-
 export function parseJson<T>(raw: string): T {
   const cleaned = raw
     .replace(/^```(?:json)?\s*/i, "")
@@ -184,99 +171,6 @@ export function parseJson<T>(raw: string): T {
     }
     throw new Error("The AI response wasn't valid JSON. Try again.");
   }
-}
-
-
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = 45000): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...init, signal: controller.signal });
-  } catch (err: any) {
-    if (err?.name === "AbortError") throw new Error("Gemini timed out while reading the resume. Please try again with a smaller PDF/DOCX.");
-    throw err;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function cleanSecret(value: string | undefined): string {
-  return String(value ?? "")
-    .trim()
-    .replace(/^\s*[\'\"]/, "")
-    .replace(/[\'\"]\s*$/, "");
-}
-
-function getGeminiApiKeys(): string[] {
-  // This application intentionally supports only the two keys the project uses:
-  // GROQ_API_KEY for text AI and GOOGLE_API_KEY for Gemini OCR/vision.
-  // GOOGLE_API_KEY is the single Gemini credential name; no GEMINI_API_KEY is required.
-  return [cleanSecret(process.env.GOOGLE_API_KEY)].filter(Boolean);
-}
-
-function getGeminiApiKey(): string {
-  return getGeminiApiKeys()[0] || "";
-}
-
-function geminiAuthError(detail: string): Error {
-  const d = String(detail || "").replace(/\s+/g, " ").trim();
-  if (/API key expired|API_KEY_INVALID|invalid api key|invalid argument|permission denied|api key not valid/i.test(d)) {
-    return new Error("Gemini authentication failed. In Vercel, set GOOGLE_API_KEY to a current Google AI Studio Gemini API key, without quotes or spaces. Ensure the key/project has Gemini API access, then redeploy.");
-  }
-  return new Error("Gemini authentication failed (HTTP 401/403). Verify the Vercel GOOGLE_API_KEY and that its Google Cloud/AI Studio project allows Gemini API access, then redeploy.");
-}
-
-export async function askGeminiJSON<T>(system: string, user: string, maxOutputTokens = 4500): Promise<T> {
-  const keys = getGeminiApiKeys();
-  if (!keys.length) throw new Error(AI_SETUP_HINT);
-  const models = Array.from(new Set([
-    process.env.GEMINI_MODEL || "gemini-2.5-flash",
-    "gemini-2.5-flash",
-    "gemini-3.7-flash",
-  ].filter(Boolean)));
-  let lastError = "Gemini could not parse the resume.";
-
-  for (const key of keys) {
-    for (const geminiModel of models) {
-      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(geminiModel)}:generateContent`;
-      try {
-        const res = await fetchWithTimeout(endpoint, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-goog-api-key": key,
-            "x-goog-api-client": "zapply-resume/1.1",
-          },
-          body: JSON.stringify({
-            contents: [{ role: "user", parts: [{ text: `${system}\n\n${user}` }] }],
-            generationConfig: { temperature: 0.1, maxOutputTokens, responseMimeType: "application/json" },
-          }),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          const text = data?.candidates?.[0]?.content?.parts?.map((part: any) => part?.text || "").join("\n").trim();
-          if (!text) throw new Error("Gemini returned an empty resume parsing response.");
-          return parseJson<T>(text);
-        }
-        const detail = await res.text().catch(() => "");
-        if (res.status === 401 || res.status === 403) {
-          // Try the other configured key before failing. This specifically
-          // Authentication errors are retained so the Google credential can be diagnosed.
-          lastError = geminiAuthError(detail).message;
-          continue;
-        }
-        if (res.status === 429) throw new Error("Gemini is rate limiting requests. Try again in a moment.");
-        if (res.status === 404) { lastError = `Gemini model ${geminiModel} is unavailable.`; continue; }
-        lastError = `Gemini request failed (${res.status}). ${detail.slice(0, 220)}`;
-      } catch (err: any) {
-        const message = String(err?.message || lastError);
-        if (/rate limiting/i.test(message)) throw err;
-        if (/timed out/i.test(message)) throw err;
-        lastError = message;
-      }
-    }
-  }
-  throw new Error(lastError);
 }
 
 /** Compact profile text used as context for scoring and answer generation. */
@@ -360,10 +254,10 @@ function normaliseExtractedText(text: unknown): string {
 /**
  * Pulls plain text out of PDF, DOC, DOCX and plain-text resumes.
  *
- * PDFs are read with unpdf and modern Word documents with mammoth. Legacy
- * Word 97-2003 `.doc` files are sent directly to the optional Gemini Vision
- * parser when GOOGLE_API_KEY is configured, avoiding an unpinned legacy
- * dependency that previously made the npm lockfile inconsistent.
+ * PDFs are read with unpdf, modern Word documents with mammoth, and legacy
+ * Word 97-2003 `.doc` files with word-extractor. The latter is pure Node JS,
+ * so it does not require LibreOffice/antiword binaries and remains deployable
+ * on Vercel/serverless runtimes.
  */
 export async function extractResumeText({
   buffer, mimeType, filename,
@@ -396,11 +290,16 @@ export async function extractResumeText({
   }
 
   if (kind === "doc") {
-    // Legacy binary .doc files do not have a reliable built-in Vercel parser.
-    // parseResumeDocument() handles them through Gemini Vision when enabled.
-    throw new Error(
-      "Legacy .DOC files require GOOGLE_API_KEY for Gemini OCR in the serverless parser. Please upload DOCX/PDF or configure GOOGLE_API_KEY for .DOC support."
-    );
+    try {
+      const WordExtractor = (await import("word-extractor")).default;
+      const extractor = new WordExtractor();
+      const document = await extractor.extract(buffer);
+      return normaliseExtractedText(document?.getBody?.());
+    } catch (err: any) {
+      throw new Error(
+        `We couldn't read this legacy DOC file. ${err?.message ?? "The Word 97-2003 document may be encrypted or corrupted."}`
+      );
+    }
   }
 
   return normaliseExtractedText(buffer.toString("utf8"));
@@ -409,56 +308,46 @@ export async function extractResumeText({
 /**
  * Optional multimodal fallback for scanned/image-only resumes.
  * It is deliberately opt-in: normal text extraction still uses the configured
- * AI provider, while GOOGLE_API_KEY can handle PDFs/images that contain no text
+ * AI provider, while GEMINI_API_KEY can handle PDFs/images that contain no text
  * layer. This avoids native OCR binaries that are unreliable on Vercel.
  */
 async function parseResumeWithGemini({
   buffer, mimeType, system, shape,
 }: { buffer: Buffer; mimeType: string; system: string; shape: string }) {
-  const keys = getGeminiApiKeys();
-  if (!keys.length) return null;
-  const models = Array.from(new Set([process.env.GEMINI_MODEL || "gemini-2.5-flash", "gemini-2.5-flash", "gemini-3.7-flash"].filter(Boolean)));
-  const safeMime = /^(application\/(pdf|msword|vnd\.openxmlformats-officedocument\.wordprocessingml\.document)|image\/(png|jpe?g|webp))$/i.test(mimeType) ? mimeType : "application/pdf";
-  const prompt = `${system}\n\nThe attached resume may be scanned. Read every page with OCR/vision as needed. Preserve exact facts and never invent missing data. Return JSON in exactly this shape:\n${shape}`;
-  let lastError = "Resume OCR could not read the document.";
+  const key = process.env.GEMINI_API_KEY || "";
+  if (!key) return null;
 
-  for (const key of keys) {
-    for (const model of models) {
-      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
-      try {
-        const res = await fetchWithTimeout(endpoint, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "x-goog-api-key": key, "x-goog-api-client": "zapply-resume/1.1" },
-          body: JSON.stringify({
-            contents: [{ role: "user", parts: [
-              { text: prompt },
-              { inline_data: { mime_type: safeMime, data: buffer.toString("base64") } },
-            ]}],
-            generationConfig: { temperature: 0.1, maxOutputTokens: 4500, responseMimeType: "application/json" },
-          }),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          const text = data?.candidates?.[0]?.content?.parts?.map((part: any) => part?.text || "").join("\n").trim();
-          if (!text) throw new Error("The OCR service returned no resume data.");
-          return parseJson<Record<string, unknown>>(text);
-        }
-        const detail = await res.text().catch(() => "");
-        if (res.status === 401 || res.status === 403) {
-          lastError = geminiAuthError(detail).message;
-          continue;
-        }
-        if (res.status === 429) throw new Error("Gemini is rate limiting requests. Try again in a moment.");
-        if (res.status === 404) { lastError = `Gemini model ${model} is unavailable.`; continue; }
-        lastError = `Resume OCR failed (${res.status}). ${detail.slice(0, 220)}`;
-      } catch (err: any) {
-        const message = String(err?.message || lastError);
-        if (/rate limiting|timed out/i.test(message)) throw err;
-        lastError = message;
-      }
-    }
+  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
+  const prompt = `${system}\n\nThe attached resume may be a scanned document. Use OCR/vision as needed. Preserve exact facts from the document and never invent missing data. Return JSON in exactly this shape:\n${shape}`;
+
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{
+        role: "user",
+        parts: [
+          { text: prompt },
+          { inline_data: { mime_type: mimeType || "application/pdf", data: buffer.toString("base64") } },
+        ],
+      }],
+      generationConfig: {
+        temperature: 0.1,
+        maxOutputTokens: 6000,
+        responseMimeType: "application/json",
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`Resume OCR failed (${res.status}). ${detail.slice(0, 180)}`);
   }
-  throw new Error(lastError);
+  const data = await res.json();
+  const text = data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text || "").join("\n").trim();
+  if (!text) throw new Error("The OCR service returned no resume data.");
+  return parseJson<Record<string, unknown>>(text);
 }
 
 /** Reads a resume file and returns structured profile sections. */
@@ -473,7 +362,7 @@ export async function parseResumeDocument({
   if (kind === "image") {
     const parsed = await parseResumeWithGemini({ buffer, mimeType: mimeType || "image/jpeg", system, shape });
     if (!parsed) {
-      throw new Error("This resume is an image. Add GOOGLE_API_KEY to enable OCR/vision parsing, or upload a text-based PDF/DOCX.");
+      throw new Error("This resume is an image. Add GEMINI_API_KEY to enable OCR/vision parsing, or upload a text-based PDF/DOCX.");
     }
     return parsed;
   }
@@ -484,52 +373,28 @@ export async function parseResumeDocument({
   } catch (err) {
     // If a PDF cannot expose a usable text layer, Gemini can still read it as a
     // document. This is the key fallback for scanned PDFs.
-    if (kind === "pdf" || kind === "doc") {
-      const parsed = await parseResumeWithGemini({ buffer, mimeType: mimeType || (kind === "pdf" ? "application/pdf" : "application/msword"), system, shape });
+    if (kind === "pdf") {
+      const parsed = await parseResumeWithGemini({ buffer, mimeType: "application/pdf", system, shape });
       if (parsed) return parsed;
     }
     throw err;
   }
 
   if (text.trim().length < 60) {
-    if (kind === "pdf" || kind === "doc") {
-      const parsed = await parseResumeWithGemini({ buffer, mimeType: mimeType || (kind === "pdf" ? "application/pdf" : "application/msword"), system, shape });
+    if (kind === "pdf") {
+      const parsed = await parseResumeWithGemini({ buffer, mimeType: "application/pdf", system, shape });
       if (parsed) return parsed;
     }
     throw new Error(
-      "That file has almost no readable text. If it is a scanned/image-only resume, add GOOGLE_API_KEY for OCR parsing or export a text-based PDF."
+      "That file has almost no readable text. If it is a scanned/image-only resume, add GEMINI_API_KEY for OCR parsing or export a text-based PDF."
     );
   }
 
   // Keep substantially more resume text. Truncating at 14k was causing long
-  // resumes to lose later experience, education and certifications. If Groq/AI
-  // is not configured but Gemini is, use Gemini for the structured extraction
-  // instead of returning a 500 for otherwise valid PDF/DOCX uploads.
-  const prompt = `Resume text:\n"""\n${text.slice(0, 24000)}\n"""\n\nReturn JSON in exactly this shape:\n${shape}`;
-
-  // Groq is preferred for text resumes. Google is a true provider fallback so
-  // a bad/transient Groq response cannot turn a valid PDF/DOCX into a 500.
-  let groqError: unknown = null;
-  if (aiEnabled()) {
-    try {
-      return await askAIJSONFast<Record<string, unknown>>(system, prompt, 4500);
-    } catch (err) {
-      groqError = err;
-    }
-  }
-
-  if (getGeminiApiKey()) {
-    try {
-      return await askGeminiJSON<Record<string, unknown>>(system, prompt, 4500);
-    } catch (err) {
-      if (groqError instanceof Error) {
-        const geminiMessage = err instanceof Error ? err.message : String(err ?? "");
-        throw new Error(geminiMessage ? `${groqError.message} Gemini fallback also failed: ${geminiMessage}` : groqError.message);
-      }
-      throw err;
-    }
-  }
-
-  if (groqError instanceof Error) throw groqError;
-  throw new Error(AI_SETUP_HINT);
+  // resumes to lose later experience, education and certifications.
+  return askAIJSON<Record<string, unknown>>(
+    system,
+    `Resume text:\n"""\n${text.slice(0, 30000)}\n"""\n\nReturn JSON in exactly this shape:\n${shape}`,
+    6000
+  );
 }
