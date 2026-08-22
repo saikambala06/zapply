@@ -1,6 +1,6 @@
 import { requireUser } from "@/lib/auth";
 import { ok, fail, handler } from "@/lib/api";
-import { aiEnabled, askAIJSON, parseResumeDocument, AI_SETUP_HINT } from "@/lib/ai";
+import { aiEnabled, askAIJSONFast, parseResumeDocument, AI_SETUP_HINT } from "@/lib/ai";
 import { normalizeParsedResume } from "@/lib/profile-shape";
 
 export const dynamic = "force-dynamic";
@@ -46,9 +46,25 @@ export const POST = handler(async (req: Request) => {
       return fail("We couldn't read enough text from that file. Try a text-based PDF, or paste the text.", 400);
     }
     const prompt = `Resume text:\n"""\n${String(text).slice(0, 30000)}\n"""\n\nReturn JSON in exactly this shape:\n${SHAPE}`;
-    const parsed = aiEnabled()
-      ? await askAIJSON<Record<string, unknown>>(SYSTEM, prompt, 3000)
-      : await import("@/lib/ai").then(({ askGeminiJSON }) => askGeminiJSON<Record<string, unknown>>(SYSTEM, prompt, 3000));
+    let parsed: Record<string, unknown>;
+    if (aiEnabled()) {
+      try {
+        parsed = await askAIJSONFast<Record<string, unknown>>(SYSTEM, prompt, 3000);
+      } catch (primaryErr: any) {
+        // Groq is preferred for text, but a transient/invalid Groq key must not
+        // make resume parsing fail when the configured Google key can parse it.
+        if (!process.env.GOOGLE_API_KEY) throw primaryErr;
+        const { askGeminiJSON } = await import("@/lib/ai");
+        try {
+          parsed = await askGeminiJSON<Record<string, unknown>>(SYSTEM, prompt, 3000);
+        } catch {
+          throw primaryErr;
+        }
+      }
+    } else {
+      const { askGeminiJSON } = await import("@/lib/ai");
+      parsed = await askGeminiJSON<Record<string, unknown>>(SYSTEM, prompt, 3000);
+    }
     return ok(normalizeParsedResume(parsed));
   }
 
@@ -79,7 +95,7 @@ export const POST = handler(async (req: Request) => {
     if (/couldn't read this (pdf|docx|legacy doc)|unsupported resume format|almost no readable text|password protected|encrypted|corrupted/i.test(message)) {
       return fail(message, 422);
     }
-    if (/AI features need|provider rejected|authentication failed|Gemini|AI request failed|AI provider is|rate limiting|request didn't go through/i.test(message)) {
+    if (/AI features need|provider rejected|authentication failed|Gemini|AI request failed|AI provider is|AI provider returned|AI request didn't go through|rate limiting|API key|invalid api|unauthorized|forbidden/i.test(message)) {
       return fail(message, 503);
     }
     throw err;

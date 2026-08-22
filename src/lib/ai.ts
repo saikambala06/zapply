@@ -38,6 +38,7 @@ type ChatOptions = {
   temperature?: number;
   json?: boolean;
   retries?: number;
+  timeoutMs?: number;
 };
 
 /**
@@ -48,7 +49,7 @@ type ChatOptions = {
  * shouldn't surface to the user as a hard failure.
  */
 async function chat(messages: Message[], opts: ChatOptions = {}): Promise<string> {
-  const { maxTokens = 1024, temperature = 0.4, json = false, retries = 2 } = opts;
+  const { maxTokens = 1024, temperature = 0.4, json = false, retries = 2, timeoutMs = 20000 } = opts;
 
   if (!aiEnabled()) throw new Error(AI_SETUP_HINT);
 
@@ -70,14 +71,14 @@ async function chat(messages: Message[], opts: ChatOptions = {}): Promise<string
   for (let attempt = 0; attempt <= retries; attempt++) {
     let res: Response;
     try {
-      res = await fetch(`${baseUrl()}/chat/completions`, {
+      res = await fetchWithTimeout(`${baseUrl()}/chat/completions`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${apiKey()}`,
         },
         body: JSON.stringify(body),
-      });
+      }, timeoutMs);
     } catch (err: any) {
       lastError = `Couldn't reach the AI provider (${err?.message ?? "network error"}).`;
       await backoff(attempt);
@@ -96,7 +97,7 @@ async function chat(messages: Message[], opts: ChatOptions = {}): Promise<string
     const detail = await res.text().catch(() => "");
 
     if (res.status === 401 || res.status === 403) {
-      throw new Error("The AI provider rejected the API key. Check GROQ_API_KEY.");
+      throw new Error("Groq authentication failed (HTTP 401/403). Verify GROQ_API_KEY in Vercel and redeploy.");
     }
     if (res.status === 404) {
       throw new Error(`The model "${model()}" isn't available on this provider. Set AI_MODEL to one that is.`);
@@ -146,6 +147,19 @@ export async function askAIJSON<T>(system: string, user: string, maxTokens = 150
       { role: "user", content: user },
     ],
     { maxTokens, json: true, temperature: 0.2 }
+  );
+  return parseJson<T>(raw);
+}
+
+/** Fast JSON completion used by resume parsing so provider failure cannot consume
+ * the entire Vercel function window before the Google fallback is attempted. */
+export async function askAIJSONFast<T>(system: string, user: string, maxTokens = 4500): Promise<T> {
+  const raw = await chat(
+    [
+      { role: "system", content: `${system}\n\nRespond with a single valid JSON object and nothing else. No prose, no markdown fences.` },
+      { role: "user", content: user },
+    ],
+    { maxTokens, json: true, temperature: 0.2, retries: 0, timeoutMs: 14000 }
   );
   return parseJson<T>(raw);
 }
@@ -492,7 +506,30 @@ export async function parseResumeDocument({
   // is not configured but Gemini is, use Gemini for the structured extraction
   // instead of returning a 500 for otherwise valid PDF/DOCX uploads.
   const prompt = `Resume text:\n"""\n${text.slice(0, 24000)}\n"""\n\nReturn JSON in exactly this shape:\n${shape}`;
-  if (aiEnabled()) return askAIJSON<Record<string, unknown>>(system, prompt, 4500);
-  if (getGeminiApiKey()) return askGeminiJSON<Record<string, unknown>>(system, prompt, 4500);
+
+  // Groq is preferred for text resumes. Google is a true provider fallback so
+  // a bad/transient Groq response cannot turn a valid PDF/DOCX into a 500.
+  let groqError: unknown = null;
+  if (aiEnabled()) {
+    try {
+      return await askAIJSONFast<Record<string, unknown>>(system, prompt, 4500);
+    } catch (err) {
+      groqError = err;
+    }
+  }
+
+  if (getGeminiApiKey()) {
+    try {
+      return await askGeminiJSON<Record<string, unknown>>(system, prompt, 4500);
+    } catch (err) {
+      if (groqError instanceof Error) {
+        const geminiMessage = err instanceof Error ? err.message : String(err ?? "");
+        throw new Error(geminiMessage ? `${groqError.message} Gemini fallback also failed: ${geminiMessage}` : groqError.message);
+      }
+      throw err;
+    }
+  }
+
+  if (groqError instanceof Error) throw groqError;
   throw new Error(AI_SETUP_HINT);
 }
