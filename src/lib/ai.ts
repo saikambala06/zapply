@@ -230,7 +230,7 @@ export async function askGeminiJSON<T>(system: string, user: string, maxOutputTo
         return parseJson<T>(text);
       }
       const detail = await res.text().catch(() => "");
-      if (res.status === 401 || res.status === 403) throw new Error(geminiAuthError(detail));
+      if (res.status === 401 || res.status === 403) throw geminiAuthError(detail);
       if (res.status === 429) throw new Error("Gemini is rate limiting requests. Try again in a moment.");
       if (res.status === 404) { lastError = `Gemini model ${geminiModel} is unavailable.`; continue; }
       lastError = `Gemini request failed (${res.status}). ${detail.slice(0, 220)}`;
@@ -406,7 +406,7 @@ async function parseResumeWithGemini({
         return parseJson<Record<string, unknown>>(text);
       }
       const detail = await res.text().catch(() => "");
-      if (res.status === 401 || res.status === 403) throw new Error(geminiAuthError(detail));
+      if (res.status === 401 || res.status === 403) throw geminiAuthError(detail);
       if (res.status === 429) throw new Error("Gemini is rate limiting requests. Try again in a moment.");
       if (res.status === 404) { lastError = `Gemini model ${model} is unavailable.`; continue; }
       lastError = `Resume OCR failed (${res.status}). ${detail.slice(0, 220)}`;
