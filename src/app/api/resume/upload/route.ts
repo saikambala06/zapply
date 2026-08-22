@@ -72,10 +72,11 @@ export const POST = handler(async (req: Request) => {
 
   // Fetch only the new document metadata. This also proves the write succeeded
   // before returning success to the browser.
-  const updated = await Profile.findOne({ _id: profile._id, userId: user._id })
+  const updated = (await Profile.findOne({ _id: profile._id, userId: user._id })
     .select("documents")
-    .lean();
-  const saved = (updated?.documents as any[])?.[((updated?.documents as any[])?.length ?? 1) - 1];
+    .lean()) as { documents?: any[] } | null;
+  const documents = Array.isArray(updated?.documents) ? updated.documents : [];
+  const saved = documents.length > 0 ? documents[documents.length - 1] : null;
   if (!saved) return fail("The resume could not be saved. Please try again.", 500);
 
   return ok({
