@@ -254,10 +254,10 @@ function normaliseExtractedText(text: unknown): string {
 /**
  * Pulls plain text out of PDF, DOC, DOCX and plain-text resumes.
  *
- * PDFs are read with unpdf, modern Word documents with mammoth, and legacy
- * Word 97-2003 `.doc` files with word-extractor. The latter is pure Node JS,
- * so it does not require LibreOffice/antiword binaries and remains deployable
- * on Vercel/serverless runtimes.
+ * PDFs are read with unpdf and modern Word documents with mammoth. Legacy
+ * Word 97-2003 `.doc` files are sent directly to the optional Gemini Vision
+ * parser when GEMINI_API_KEY is configured, avoiding an unpinned legacy
+ * dependency that previously made the npm lockfile inconsistent.
  */
 export async function extractResumeText({
   buffer, mimeType, filename,
@@ -290,16 +290,11 @@ export async function extractResumeText({
   }
 
   if (kind === "doc") {
-    try {
-      const WordExtractor = (await import("word-extractor")).default;
-      const extractor = new WordExtractor();
-      const document = await extractor.extract(buffer);
-      return normaliseExtractedText(document?.getBody?.());
-    } catch (err: any) {
-      throw new Error(
-        `We couldn't read this legacy DOC file. ${err?.message ?? "The Word 97-2003 document may be encrypted or corrupted."}`
-      );
-    }
+    // Legacy binary .doc files do not have a reliable built-in Vercel parser.
+    // parseResumeDocument() handles them through Gemini Vision when enabled.
+    throw new Error(
+      "Legacy .DOC files require GEMINI_API_KEY for secure serverless parsing. Please upload DOCX/PDF, or enable Gemini OCR for .DOC support."
+    );
   }
 
   return normaliseExtractedText(buffer.toString("utf8"));
@@ -373,16 +368,16 @@ export async function parseResumeDocument({
   } catch (err) {
     // If a PDF cannot expose a usable text layer, Gemini can still read it as a
     // document. This is the key fallback for scanned PDFs.
-    if (kind === "pdf") {
-      const parsed = await parseResumeWithGemini({ buffer, mimeType: "application/pdf", system, shape });
+    if (kind === "pdf" || kind === "doc") {
+      const parsed = await parseResumeWithGemini({ buffer, mimeType: mimeType || (kind === "pdf" ? "application/pdf" : "application/msword"), system, shape });
       if (parsed) return parsed;
     }
     throw err;
   }
 
   if (text.trim().length < 60) {
-    if (kind === "pdf") {
-      const parsed = await parseResumeWithGemini({ buffer, mimeType: "application/pdf", system, shape });
+    if (kind === "pdf" || kind === "doc") {
+      const parsed = await parseResumeWithGemini({ buffer, mimeType: mimeType || (kind === "pdf" ? "application/pdf" : "application/msword"), system, shape });
       if (parsed) return parsed;
     }
     throw new Error(
