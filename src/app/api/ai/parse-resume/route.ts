@@ -33,8 +33,8 @@ const SYSTEM =
  */
 export const POST = handler(async (req: Request) => {
   await requireUser(req as any);
-  if (!aiEnabled() && !process.env.GEMINI_API_KEY && !process.env.GOOGLE_API_KEY) {
-    return fail("Resume parsing needs an AI provider. Configure GROQ_API_KEY/AI_API_KEY or GEMINI_API_KEY/GOOGLE_API_KEY.", 503);
+  if (!aiEnabled() && !process.env.GOOGLE_API_KEY) {
+    return fail("Resume parsing needs GROQ_API_KEY. Scanned/image-only resumes also require GOOGLE_API_KEY for Gemini OCR.", 503);
   }
 
   const contentType = req.headers.get("content-type") ?? "";
