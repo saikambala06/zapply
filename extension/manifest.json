@@ -1,0 +1,63 @@
+{
+  "manifest_version": 3,
+  "name": "Zapply — Job Application Autofill",
+  "version": "1.0.0",
+  "description": "Fill job applications in one click, reuse your saved answers, and track every application automatically.",
+  "minimum_chrome_version": "102",
+
+  "permissions": ["storage", "activeTab", "scripting", "tabs"],
+
+  "host_permissions": ["http://*/*", "https://*/*"],
+
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "Zapply",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": [
+        "lib/field-map.js",
+        "lib/matcher.js",
+        "lib/ats.js",
+        "content/autofill.js"
+      ],
+      "css": ["content/overlay.css"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+
+  "commands": {
+    "run-autofill": {
+      "suggested_key": { "default": "Alt+Shift+F" },
+      "description": "Fill the application on this page"
+    }
+  },
+
+  "web_accessible_resources": [
+    {
+      "resources": ["content/overlay.css", "icons/*"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
