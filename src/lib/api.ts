@@ -23,6 +23,16 @@ export function handler<T extends (...args: any[]) => Promise<Response>>(fn: T):
       }
       if (err?.code === 11000) return fail("That record already exists.", 409);
 
+      // MongoDB's BSON limit is 16 MB. Give the browser a useful message
+      // instead of hiding a large-document failure behind a random ref code.
+      if (err?.code === 10334 || /BSONObj size|document is larger than the maximum/i.test(String(err?.message || ""))) {
+        return fail("That file or record is too large for the database. Use a smaller resume (3 MB or less) and try again.", 413);
+      }
+
+      if (/request body.*too large|body.*exceed.*limit|FUNCTION_PAYLOAD_TOO_LARGE/i.test(String(err?.message || ""))) {
+        return fail("That upload is too large for this serverless deployment. Please use a smaller resume and try again.", 413);
+      }
+
       // Mongoose shape failures are the caller's problem, not a server fault —
       // report the offending field instead of a blank 500.
       if (err?.name === "ValidationError" || err?.name === "CastError") {

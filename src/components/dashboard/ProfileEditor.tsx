@@ -220,6 +220,9 @@ export default function ProfileEditor({
     setParsing(true);
     setError("");
     try {
+      if (file.size > 4 * 1024 * 1024) {
+        throw new Error("That resume is over 4 MB. Please export/compress it to a smaller PDF or DOCX and try again.");
+      }
       // Uploading from the toolbar should also store the file, so it gets
       // attached to applications that ask for one — not just read and discarded.
       if (alsoAttach) {
@@ -230,8 +233,9 @@ export default function ProfileEditor({
       const fd = new FormData();
       fd.append("file", file);
       const res = await fetch("/api/ai/parse-resume", { method: "POST", body: fd });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error);
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.error || `Resume parsing failed (${res.status}). Please try again.`);
+      if (!json?.data) throw new Error("Resume parsing returned no profile data. Please try again.");
       setParsed(json.data);
     } catch (e: any) {
       setError(e.message);
@@ -294,6 +298,10 @@ export default function ProfileEditor({
 
   async function uploadResume(file: File, kind = "resume") {
     try {
+      if (file.size > 3 * 1024 * 1024) {
+        setError("That resume is over 3 MB. Please export/compress it to a smaller PDF or DOCX and try again.");
+        return false;
+      }
       const fd = new FormData();
       fd.append("file", file);
       fd.append("profileId", p._id);
@@ -517,7 +525,7 @@ export default function ProfileEditor({
               <label className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-line bg-canvas px-6 py-10 text-center transition hover:border-brand-300 hover:bg-brand-50">
                 <Upload className="h-6 w-6 text-brand-500" />
                 <span className="mt-3 text-[15px] font-semibold">Upload your resume</span>
-                <span className="mt-1 text-[13px] text-ink-soft">PDF, DOC, DOCX, TXT, PNG, JPG or WEBP · up to 12 MB</span>
+                <span className="mt-1 text-[13px] text-ink-soft">PDF, DOC, DOCX, TXT, PNG, JPG or WEBP · up to 3 MB</span>
                 <span className="mt-1 text-[12px] text-ink-faint">Attached automatically to applications that ask for a file</span>
                 <input
                   type="file"

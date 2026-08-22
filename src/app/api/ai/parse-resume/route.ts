@@ -6,7 +6,7 @@ import { normalizeParsedResume } from "@/lib/profile-shape";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const MAX_BYTES = 12 * 1024 * 1024;
+const MAX_BYTES = 4 * 1024 * 1024;
 
 const SHAPE = `{"personal":{"firstName":"","middleName":"","lastName":"","preferredName":"","email":"","phone":"","phoneCountryCode":"","phoneType":"Mobile","city":"","state":"","zip":"","country":"","address":"","addressLine2":"","nationality":"","citizenship":"","languages":[]},
  "summary":"",
@@ -56,7 +56,7 @@ export const POST = handler(async (req: Request) => {
   const form = await req.formData();
   const file = form.get("file") as File | null;
   if (!file) return fail("Choose a resume file to read.", 400);
-  if (file.size > MAX_BYTES) return fail("That file is over 12 MB. Compress it and try again.", 413);
+  if (file.size > MAX_BYTES) return fail("That resume is over 4 MB. Please export/compress it to a smaller PDF or DOCX and try again.", 413);
 
   const buffer = Buffer.from(await file.arrayBuffer());
   try {
