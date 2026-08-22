@@ -187,18 +187,37 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = 4500
   }
 }
 
-async function askGeminiJSON<T>(system: string, user: string, maxOutputTokens = 4500): Promise<T> {
-  const key = process.env.GEMINI_API_KEY || "";
+function cleanSecret(value: string | undefined): string {
+  return String(value ?? "")
+    .trim()
+    .replace(/^\s*[\'\"]/, "")
+    .replace(/[\'\"]\s*$/, "");
+}
+
+function getGeminiApiKey(): string {
+  return cleanSecret(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
+}
+
+function geminiAuthError(detail: string): Error {
+  const d = String(detail || "").replace(/\s+/g, " ").trim();
+  if (/API key expired|API_KEY_INVALID|invalid api key|invalid argument|permission denied|api key not valid/i.test(d)) {
+    return new Error("Gemini authentication failed. In Vercel, set GEMINI_API_KEY to a current Google AI Studio API key (or GOOGLE_API_KEY), without quotes or spaces. Restrict the key to the Gemini API and redeploy.");
+  }
+  return new Error("Gemini authentication failed (HTTP 401/403). Verify the Vercel GEMINI_API_KEY/GOOGLE_API_KEY and its Gemini API restriction, then redeploy.");
+}
+
+export async function askGeminiJSON<T>(system: string, user: string, maxOutputTokens = 4500): Promise<T> {
+  const key = getGeminiApiKey();
   if (!key) throw new Error(AI_SETUP_HINT);
-  const models = Array.from(new Set([process.env.GEMINI_MODEL || "gemini-3.7-flash", "gemini-2.5-flash"].filter(Boolean)));
+  const models = Array.from(new Set([process.env.GEMINI_MODEL || "gemini-2.5-flash", "gemini-3.7-flash"].filter(Boolean)));
   let lastError = "Gemini could not parse the resume.";
 
   for (const geminiModel of models) {
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(geminiModel)}:generateContent?key=${encodeURIComponent(key)}`;
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(geminiModel)}:generateContent`;
     try {
       const res = await fetchWithTimeout(endpoint, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-goog-api-key": key, "x-goog-api-client": "zapply-resume/1.0" },
         body: JSON.stringify({
           contents: [{ role: "user", parts: [{ text: `${system}\n\n${user}` }] }],
           generationConfig: { temperature: 0.1, maxOutputTokens, responseMimeType: "application/json" },
@@ -211,7 +230,7 @@ async function askGeminiJSON<T>(system: string, user: string, maxOutputTokens = 
         return parseJson<T>(text);
       }
       const detail = await res.text().catch(() => "");
-      if (res.status === 401 || res.status === 403) throw new Error("The Gemini provider rejected GEMINI_API_KEY. Check the key in Vercel.");
+      if (res.status === 401 || res.status === 403) throw new Error(geminiAuthError(detail));
       if (res.status === 429) throw new Error("Gemini is rate limiting requests. Try again in a moment.");
       if (res.status === 404) { lastError = `Gemini model ${geminiModel} is unavailable.`; continue; }
       lastError = `Gemini request failed (${res.status}). ${detail.slice(0, 220)}`;
@@ -359,19 +378,19 @@ export async function extractResumeText({
 async function parseResumeWithGemini({
   buffer, mimeType, system, shape,
 }: { buffer: Buffer; mimeType: string; system: string; shape: string }) {
-  const key = process.env.GEMINI_API_KEY || "";
+  const key = getGeminiApiKey();
   if (!key) return null;
-  const models = Array.from(new Set([process.env.GEMINI_MODEL || "gemini-3.7-flash", "gemini-2.5-flash"].filter(Boolean)));
+  const models = Array.from(new Set([process.env.GEMINI_MODEL || "gemini-2.5-flash", "gemini-3.7-flash"].filter(Boolean)));
   const safeMime = /^(application\/(pdf|msword|vnd\.openxmlformats-officedocument\.wordprocessingml\.document)|image\/(png|jpe?g|webp))$/i.test(mimeType) ? mimeType : "application/pdf";
   const prompt = `${system}\n\nThe attached resume may be scanned. Read every page with OCR/vision as needed. Preserve exact facts and never invent missing data. Return JSON in exactly this shape:\n${shape}`;
   let lastError = "Resume OCR could not read the document.";
 
   for (const model of models) {
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
     try {
       const res = await fetchWithTimeout(endpoint, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-goog-api-key": key, "x-goog-api-client": "zapply-resume/1.0" },
         body: JSON.stringify({
           contents: [{ role: "user", parts: [
             { text: prompt },
@@ -387,7 +406,7 @@ async function parseResumeWithGemini({
         return parseJson<Record<string, unknown>>(text);
       }
       const detail = await res.text().catch(() => "");
-      if (res.status === 401 || res.status === 403) throw new Error("The Gemini provider rejected GEMINI_API_KEY. Check the key in Vercel.");
+      if (res.status === 401 || res.status === 403) throw new Error(geminiAuthError(detail));
       if (res.status === 429) throw new Error("Gemini is rate limiting requests. Try again in a moment.");
       if (res.status === 404) { lastError = `Gemini model ${model} is unavailable.`; continue; }
       lastError = `Resume OCR failed (${res.status}). ${detail.slice(0, 220)}`;
@@ -445,6 +464,6 @@ export async function parseResumeDocument({
   // instead of returning a 500 for otherwise valid PDF/DOCX uploads.
   const prompt = `Resume text:\n"""\n${text.slice(0, 24000)}\n"""\n\nReturn JSON in exactly this shape:\n${shape}`;
   if (aiEnabled()) return askAIJSON<Record<string, unknown>>(system, prompt, 4500);
-  if (process.env.GEMINI_API_KEY) return askGeminiJSON<Record<string, unknown>>(system, prompt, 4500);
+  if (getGeminiApiKey()) return askGeminiJSON<Record<string, unknown>>(system, prompt, 4500);
   throw new Error(AI_SETUP_HINT);
 }

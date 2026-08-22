@@ -33,8 +33,8 @@ const SYSTEM =
  */
 export const POST = handler(async (req: Request) => {
   await requireUser(req as any);
-  if (!aiEnabled() && !process.env.GEMINI_API_KEY) {
-    return fail("Resume parsing needs an AI provider. Configure GROQ_API_KEY/AI_API_KEY, or GEMINI_API_KEY for OCR/vision parsing.", 503);
+  if (!aiEnabled() && !process.env.GEMINI_API_KEY && !process.env.GOOGLE_API_KEY) {
+    return fail("Resume parsing needs an AI provider. Configure GROQ_API_KEY/AI_API_KEY or GEMINI_API_KEY/GOOGLE_API_KEY.", 503);
   }
 
   const contentType = req.headers.get("content-type") ?? "";
@@ -45,11 +45,10 @@ export const POST = handler(async (req: Request) => {
     if (!text || String(text).trim().length < 60) {
       return fail("We couldn't read enough text from that file. Try a text-based PDF, or paste the text.", 400);
     }
-    const parsed = await askAIJSON<Record<string, unknown>>(
-      SYSTEM,
-      `Resume text:\n"""\n${String(text).slice(0, 30000)}\n"""\n\nReturn JSON in exactly this shape:\n${SHAPE}`,
-      3000
-    );
+    const prompt = `Resume text:\n"""\n${String(text).slice(0, 30000)}\n"""\n\nReturn JSON in exactly this shape:\n${SHAPE}`;
+    const parsed = aiEnabled()
+      ? await askAIJSON<Record<string, unknown>>(SYSTEM, prompt, 3000)
+      : await import("@/lib/ai").then(({ askGeminiJSON }) => askGeminiJSON<Record<string, unknown>>(SYSTEM, prompt, 3000));
     return ok(normalizeParsedResume(parsed));
   }
 
@@ -80,7 +79,7 @@ export const POST = handler(async (req: Request) => {
     if (/couldn't read this (pdf|docx|legacy doc)|unsupported resume format|almost no readable text|password protected|encrypted|corrupted/i.test(message)) {
       return fail(message, 422);
     }
-    if (/AI features need|provider rejected|Gemini|AI request failed|AI provider is|rate limiting|request didn't go through/i.test(message)) {
+    if (/AI features need|provider rejected|authentication failed|Gemini|AI request failed|AI provider is|rate limiting|request didn't go through/i.test(message)) {
       return fail(message, 503);
     }
     throw err;
