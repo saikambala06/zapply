@@ -221,19 +221,19 @@ export default function ProfileEditor({
     setError("");
     try {
       if (file.size > 4 * 1024 * 1024) {
-        throw new Error("That resume is over 4 MB. Please export/compress it to a smaller file and try again.");
+        throw new Error("That resume is over 4 MB. Please export/compress it to a smaller PDF or DOCX and try again.");
       }
       // Parse first; attachment storage is intentionally done after successful
       // parsing so a slow MongoDB write cannot make the AI step appear stuck.
       const fd = new FormData();
       fd.append("file", file);
       const controller = new AbortController();
-      const timeout = window.setTimeout(() => controller.abort(), 90_000);
+      const timeout = window.setTimeout(() => controller.abort(), 65_000);
       let res: Response;
       try {
         res = await fetch("/api/ai/parse-resume", { method: "POST", body: fd, signal: controller.signal });
       } catch (err: any) {
-        if (err?.name === "AbortError") throw new Error("Resume parsing took too long. Please retry once. Large or scanned resumes can take longer to process.");
+        if (err?.name === "AbortError") throw new Error("Resume parsing took too long. Please retry once. Very large documents can take longer to process.");
         throw err;
       } finally {
         window.clearTimeout(timeout);
@@ -308,7 +308,7 @@ export default function ProfileEditor({
   async function uploadResume(file: File, kind = "resume") {
     try {
       if (file.size > 3 * 1024 * 1024) {
-        setError("That resume is over 4 MB. Please export/compress it to a smaller file and try again.");
+        setError("That resume is over 3 MB. Please export/compress it to a smaller PDF or DOCX and try again.");
         return false;
       }
       const fd = new FormData();

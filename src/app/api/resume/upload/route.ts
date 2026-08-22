@@ -22,9 +22,9 @@ export const POST = handler(async (req: Request) => {
   if (!file) return fail("Choose a file to upload.", 400);
   if (file.size > MAX_BYTES) return fail("That resume is over 4 MB. Please export/compress it to a smaller PDF or DOCX and try again.", 413);
 
-  const allowed = ["application/pdf", "application/msword", "application/vnd.ms-word", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/octet-stream", "text/plain", "text/markdown", "text/rtf", "application/rtf", "image/png", "image/jpeg", "image/webp"];
-  const extOk = /\.(pdf|doc|docx|rtf|txt|md|csv|html?|png|jpe?g|webp)$/i.test(file.name);
-  if (!allowed.includes(file.type) && !extOk) return fail("Upload a PDF, DOC, DOCX, RTF, TXT, PNG, JPG or WEBP file.", 415);
+  const allowed = ["application/pdf", "application/msword", "application/vnd.ms-word", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/octet-stream", "text/plain", "text/markdown", "image/png", "image/jpeg", "image/webp"];
+  const extOk = /\.(pdf|doc|docx|txt|md|png|jpe?g|webp)$/i.test(file.name);
+  if (!allowed.includes(file.type) && !extOk) return fail("Upload a PDF, DOC, DOCX, TXT, PNG, JPG or WEBP file.", 415);
 
   await connectDB();
   const profile =

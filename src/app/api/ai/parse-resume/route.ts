@@ -1,10 +1,10 @@
 import { requireUser } from "@/lib/auth";
 import { ok, fail, handler } from "@/lib/api";
-import { askAIJSONFast, parseResumeDocument } from "@/lib/ai";
+import { aiEnabled, askAIJSONFast, parseResumeDocument } from "@/lib/ai";
 import { normalizeParsedResume } from "@/lib/profile-shape";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 55;
+export const maxDuration = 60;
 export const preferredRegion = "iad1";
 
 const MAX_BYTES = 4 * 1024 * 1024;
@@ -33,13 +33,17 @@ const SYSTEM =
  */
 export const POST = handler(async (req: Request) => {
   await requireUser(req as any);
+  if (!aiEnabled()) {
+    return fail("Resume parsing needs GOOGLE_API_KEY. Configure a Gemini API key in Vercel and redeploy.", 503);
+  }
+
   const contentType = req.headers.get("content-type") ?? "";
 
   // JSON body: the caller already has the text.
   if (contentType.includes("application/json")) {
     const { text } = await req.json();
     if (!text || String(text).trim().length < 60) {
-      return fail("We couldn't read enough text from that file. Try a PDF, DOC, DOCX, RTF or TXT resume.", 400);
+      return fail("We couldn't read enough text from that file. Try a text-based PDF/DOCX, or paste the text.", 400);
     }
     const prompt = `Resume text:
 """
@@ -48,17 +52,7 @@ ${String(text)}
 
 Return JSON in exactly this shape:
 ${SHAPE}`;
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = await askAIJSONFast<Record<string, unknown>>(SYSTEM, prompt, 3500);
-    } catch (err) {
-      // Keep JSON/text callers resilient too: the browser may submit already
-      // extracted resume text instead of the original file. Never let a bad
-      // model response turn into a 500/504 when we can still recover locally.
-      console.error("[parse-resume:text-fallback] Gemini failed; using local extraction", err);
-      const { fallbackParseResumeText } = await import("@/lib/ai");
-      parsed = fallbackParseResumeText(String(text));
-    }
+    const parsed = await askAIJSONFast<Record<string, unknown>>(SYSTEM, prompt, 5000);
     return ok(normalizeParsedResume(parsed));
   }
 
@@ -86,13 +80,12 @@ ${SHAPE}`;
     const message = String(err?.message || "We couldn't parse that resume.");
     // Bad/corrupt/unsupported files are client-fixable; don't turn them into
     // opaque 500 errors. AI/provider errors are allowed to bubble to handler().
-    if (/couldn't read this (pdf|docx|legacy doc|rtf)|unsupported resume format|almost no readable text|password protected|encrypted|corrupted/i.test(message)) {
+    if (/couldn't read this (pdf|docx|legacy doc)|unsupported resume format|almost no readable text|password protected|encrypted|corrupted/i.test(message)) {
       return fail(message, 422);
     }
     if (/AI features need|provider rejected|authentication failed|Gemini|AI request failed|AI provider is|AI provider returned|AI request didn't go through|rate limiting|API key|invalid api|unauthorized|forbidden/i.test(message)) {
       return fail(message, 503);
     }
-    console.error("[parse-resume] unexpected parser error", err);
-    return fail("We could not parse that resume. Please try the upload again with the original file.", 422);
+    throw err;
   }
 });

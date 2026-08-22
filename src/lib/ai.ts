@@ -6,8 +6,7 @@
  * of truncating them or routing normal parsing through another provider.
  */
 
-const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite";
-const GEMINI_FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
+const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
 const GEMINI_API_ROOT = "https://generativelanguage.googleapis.com/v1beta/models";
 const MAX_RESUME_TEXT_CHARS = 900_000;
 
@@ -19,7 +18,6 @@ type ChatOptions = {
   retries?: number;
   timeoutMs?: number;
   json?: boolean;
-  fallbackModels?: boolean;
 };
 
 function cleanSecret(value: string | undefined): string {
@@ -30,7 +28,7 @@ function cleanSecret(value: string | undefined): string {
 }
 
 function getGeminiApiKey(): string {
-  return cleanSecret(process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || process.env.GOOGLE_GEMINI_API_KEY);
+  return cleanSecret(process.env.GOOGLE_API_KEY);
 }
 
 function getGeminiModel(): string {
@@ -81,89 +79,73 @@ async function geminiGenerate(
   contents: unknown[],
   opts: ChatOptions = {}
 ): Promise<string> {
-  const { maxTokens = 1024, temperature = 0.2, retries = 1, timeoutMs = 45000, json = false, fallbackModels = true } = opts;
+  const { maxTokens = 1024, temperature = 0.2, retries = 1, timeoutMs = 45000, json = false } = opts;
   const key = getGeminiApiKey();
   if (!key) throw new Error(AI_SETUP_HINT);
 
-  const configuredModel = getGeminiModel();
-  const models = fallbackModels
-    ? Array.from(new Set([configuredModel, ...GEMINI_FALLBACK_MODELS]))
-    : [configuredModel];
+  const model = getGeminiModel();
+  const endpoint = `${GEMINI_API_ROOT}/${encodeURIComponent(model)}:generateContent`;
   let lastError = "Gemini request failed.";
 
-  for (const model of models) {
-    const endpoint = `${GEMINI_API_ROOT}/${encodeURIComponent(model)}:generateContent`;
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      let res: Response;
-      try {
-        res = await fetchWithTimeout(endpoint, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-goog-api-key": key,
-            "x-goog-api-client": "zapply-resume/1.3",
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    let res: Response;
+    try {
+      res = await fetchWithTimeout(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": key,
+          "x-goog-api-client": "zapply-resume/1.2",
+        },
+        body: JSON.stringify({
+          contents,
+          generationConfig: {
+            temperature,
+            maxOutputTokens: maxTokens,
+            ...(json ? { responseMimeType: "application/json" } : {}),
           },
-          body: JSON.stringify({
-            contents,
-            generationConfig: {
-              temperature,
-              maxOutputTokens: maxTokens,
-              ...(json ? { responseMimeType: "application/json" } : {}),
-            },
-          }),
-        }, timeoutMs);
-      } catch (err: any) {
-        lastError = String(err?.message || "Couldn't reach Gemini.");
-        if (attempt < retries) {
-          await backoff(attempt);
-          continue;
-        }
-        break;
+        }),
+      }, timeoutMs);
+    } catch (err: any) {
+      lastError = String(err?.message || "Couldn't reach Gemini.");
+      if (attempt < retries) {
+        await backoff(attempt);
+        continue;
       }
-
-      if (res.ok) {
-        const data = await res.json().catch(() => null);
-        const text = data?.candidates?.[0]?.content?.parts
-          ?.map((part: any) => part?.text || "")
-          .join("\n")
-          .trim();
-        if (text) return text;
-        lastError = "Gemini returned an empty response.";
-        if (attempt < retries) {
-          await backoff(attempt);
-          continue;
-        }
-        break;
-      }
-
-      const detail = await res.text().catch(() => "");
-      if (res.status === 401 || res.status === 403) throw geminiAuthError(detail);
-      if (res.status === 404) {
-        lastError = `Gemini model "${model}" is unavailable.`;
-        break;
-      }
-      if (res.status === 429 || res.status >= 500) {
-        lastError = res.status === 429
-          ? "Gemini is rate limiting requests."
-          : "Gemini is temporarily unavailable.";
-        if (attempt < retries) {
-          const retryAfter = Number(res.headers.get("retry-after"));
-          await backoff(attempt, Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter * 1000, 5000) : undefined);
-          continue;
-        }
-        break;
-      }
-
-      // A few model/account combinations reject JSON mode even though text
-      // generation works. The caller can retry once without responseMimeType.
-      if (res.status === 400 && json && /json|response.?mime|structured/i.test(detail)) {
-        lastError = detail.slice(0, 300) || "Gemini rejected JSON mode.";
-        break;
-      }
-
-      lastError = `Gemini request failed (${res.status}). ${detail.slice(0, 240)}`;
-      break;
+      throw new Error(lastError);
     }
+
+    if (res.ok) {
+      const data = await res.json();
+      const text = data?.candidates?.[0]?.content?.parts
+        ?.map((part: any) => part?.text || "")
+        .join("\n")
+        .trim();
+      if (text) return text;
+      lastError = "Gemini returned an empty response.";
+      if (attempt < retries) {
+        await backoff(attempt);
+        continue;
+      }
+      throw new Error(lastError);
+    }
+
+    const detail = await res.text().catch(() => "");
+    if (res.status === 401 || res.status === 403) throw geminiAuthError(detail);
+    if (res.status === 404) throw new Error(`Gemini model \"${model}\" is unavailable. Set GEMINI_MODEL to a supported model.`);
+    if (res.status === 429 || res.status >= 500) {
+      lastError = res.status === 429
+        ? "Gemini is rate limiting requests. Try again in a moment."
+        : "Gemini is temporarily unavailable. Please try again shortly.";
+      if (attempt < retries) {
+        const retryAfter = Number(res.headers.get("retry-after"));
+        await backoff(attempt, Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : undefined);
+        continue;
+      }
+      throw new Error(lastError);
+    }
+
+    throw new Error(`Gemini request failed (${res.status}). ${detail.slice(0, 240)}`);
   }
 
   throw new Error(lastError);
@@ -199,20 +181,12 @@ export async function askAIJSON<T>(system: string, user: string, maxTokens = 150
   return parseJson<T>(raw);
 }
 
-async function askAIJSONResilient<T>(system: string, user: string, maxTokens = 3500): Promise<T> {
-  // Keep resume parsing comfortably below Vercel's serverless timeout. A
-  // second 45s provider attempt used to turn a recoverable AI/JSON problem
-  // into a platform-level 504. One bounded request is enough because the
-  // caller already has a deterministic local parser as a safe fallback.
-  return await askAIJSONFast<T>(system, user, maxTokens);
-}
-
 /** Fast one-shot JSON extraction used by resume parsing. */
 export async function askAIJSONFast<T>(system: string, user: string, maxTokens = 4500): Promise<T> {
   const raw = await geminiGenerate(messagesToContents([
     { role: "system", content: `${system}\n\nRespond with one valid JSON object and nothing else. No prose and no markdown fences.` },
     { role: "user", content: user },
-  ]), { maxTokens, temperature: 0.1, retries: 0, timeoutMs: 18000, json: true, fallbackModels: false });
+  ]), { maxTokens, temperature: 0.1, retries: 0, timeoutMs: 45000, json: true });
   return parseJson<T>(raw);
 }
 
@@ -279,7 +253,7 @@ export function profileToContext(p: any) {
 /* Resume reading                                                     */
 /* ------------------------------------------------------------------ */
 
-export type ResumeFileKind = "pdf" | "doc" | "docx" | "rtf" | "text" | "image";
+export type ResumeFileKind = "pdf" | "doc" | "docx" | "text" | "image";
 
 function detectResumeFileKind(buffer: Buffer, mimeType: string, filename: string): ResumeFileKind | null {
   const name = filename.toLowerCase();
@@ -292,8 +266,7 @@ function detectResumeFileKind(buffer: Buffer, mimeType: string, filename: string
   if (mime === "application/pdf" || /\.pdf$/i.test(name)) return "pdf";
   if (mime === "application/msword" || /\.doc$/i.test(name)) return "doc";
   if (mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || /\.docx$/i.test(name)) return "docx";
-  if (mime === "application/rtf" || mime === "text/rtf" || /\.rtf$/i.test(name)) return "rtf";
-  if (mime.startsWith("text/") || /\.(txt|md|csv|html|htm)$/i.test(name)) return "text";
+  if (mime.startsWith("text/") || /\.(txt|md)$/i.test(name)) return "text";
   if (mime.startsWith("image/") || /\.(png|jpe?g|webp)$/i.test(name)) return "image";
   return null;
 }
@@ -311,7 +284,7 @@ export async function extractResumeText({
   buffer, mimeType, filename,
 }: { buffer: Buffer; mimeType: string; filename: string }): Promise<string> {
   const kind = detectResumeFileKind(buffer, mimeType, filename);
-  if (!kind) throw new Error("Unsupported resume format. Upload PDF, DOC, DOCX, RTF, TXT, PNG, JPG or WEBP.");
+  if (!kind) throw new Error("Unsupported resume format. Upload PDF, DOC, DOCX, TXT, PNG, JPG or WEBP.");
 
   if (kind === "pdf") {
     try {
@@ -335,37 +308,7 @@ export async function extractResumeText({
   }
 
   if (kind === "doc") {
-    try {
-      // word-extractor is pure JavaScript and supports legacy OLE/Word 97-2003
-      // files from a Buffer, so this works on Vercel without LibreOffice/antiword.
-      const mod: any = await import("word-extractor");
-      const WordExtractor = mod.default ?? mod;
-      const extractor = new WordExtractor();
-      const doc = await extractor.extract(buffer);
-      const pieces = [
-        typeof doc?.getBody === "function" ? doc.getBody() : "",
-        typeof doc?.getHeaders === "function" ? doc.getHeaders() : "",
-        typeof doc?.getFooters === "function" ? doc.getFooters() : "",
-        typeof doc?.getTextboxes === "function" ? doc.getTextboxes() : "",
-        typeof doc?.getAnnotations === "function" ? doc.getAnnotations() : "",
-        typeof doc?.getFootnotes === "function" ? doc.getFootnotes() : "",
-        typeof doc?.getEndnotes === "function" ? doc.getEndnotes() : "",
-      ].filter(Boolean);
-      return normaliseExtractedText(pieces.join("\n"));
-    } catch (err: any) {
-      throw new Error(`We couldn't read this legacy DOC file. ${err?.message ?? "The Word document may be corrupted, encrypted, or unsupported."}`);
-    }
-  }
-
-  if (kind === "rtf") {
-    const decoded = buffer.toString("latin1")
-      .replace(/\\'[0-9a-fA-F]{2}/g, (m: string) => String.fromCharCode(parseInt(m.slice(2), 16)))
-      .replace(/\\par[d]?/g, "\n")
-      .replace(/\\tab/g, "\t")
-      .replace(/\\u-?\d+\??/g, "")
-      .replace(/\\[a-zA-Z]+-?\d* ?/g, "")
-      .replace(/[{}]/g, "");
-    return normaliseExtractedText(decoded);
+    throw new Error("Legacy .DOC files are not supported by the serverless text extractor. Please save the file as DOCX or PDF.");
   }
 
   return normaliseExtractedText(buffer.toString("utf8"));
@@ -387,105 +330,9 @@ async function parseResumeWithGemini({
       { text: prompt },
       { inline_data: { mime_type: safeMime, data: buffer.toString("base64") } },
     ] },
-  ], { maxTokens: 3500, temperature: 0.1, retries: 0, timeoutMs: 18000, json: true, fallbackModels: false });
+  ], { maxTokens: 5000, temperature: 0.1, retries: 0, timeoutMs: 45000, json: true });
 
   return parseJson<Record<string, unknown>>(raw);
-}
-
-
-type PersonalNameParts = {
-  firstName: string;
-  middleName: string;
-  lastName: string;
-  email: string;
-  phone: string;
-  phoneType: string;
-};
-
-function extractFirstNameParts(name: string): PersonalNameParts {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  return {
-    firstName: parts[0] ?? "",
-    middleName: parts.length > 2 ? parts.slice(1, -1).join(" ") : "",
-    lastName: parts.length > 1 ? parts[parts.length - 1] : "",
-    email: "",
-    phone: "",
-    phoneType: "Mobile",
-  };
-}
-
-/**
- * Deterministic fallback used when Gemini is temporarily unavailable or not
- * configured. It is intentionally conservative: it extracts facts that can be
- * identified without guessing and leaves everything else blank.
- */
-export function fallbackParseResumeText(text: string): Record<string, unknown> {
-  const clean = normaliseExtractedText(text);
-  const lines = clean.split(/\n+/).map((s) => s.trim()).filter(Boolean);
-  const joined = lines.join("\n");
-  const email = joined.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] ?? "";
-  const phone = joined.match(/(?:\+?\d[\d\s().-]{7,}\d)/)?.[0]?.replace(/\s+/g, " ").trim() ?? "";
-  const urlMatches = joined.match(/https?:\/\/[^\s)]+/gi) ?? [];
-  const websites = urlMatches.slice(0, 20).map((url) => ({
-    label: /linkedin/i.test(url) ? "LinkedIn" : /github/i.test(url) ? "GitHub" : "Portfolio",
-    url: url.replace(/[.,;]+$/, ""),
-  }));
-
-  const headerWords = new Set(["resume", "curriculum vitae", "cv", "professional summary", "summary", "experience", "professional experience", "skills", "education", "certifications", "certification"]);
-  const candidateName = lines.slice(0, 12).find((line) => {
-    if (line.length < 3 || line.length > 70) return false;
-    if (headerWords.has(line.toLowerCase())) return false;
-    if (/@/.test(line) || /https?:\/\//i.test(line) || /\d{3,}/.test(line)) return false;
-    return /^[A-Za-z][A-Za-z .,'’-]+$/.test(line) && line.split(/\s+/).length <= 5;
-  }) ?? "";
-  const personal = extractFirstNameParts(candidateName);
-  personal.email = email;
-  personal.phone = phone;
-  personal.phoneType = "Mobile";
-
-  const section = (names: string[]) => {
-    const lower = lines.map((x) => x.toLowerCase());
-    const start = lower.findIndex((x) => names.some((n) => x === n || x.startsWith(`${n}:`)));
-    if (start < 0) return [] as string[];
-    const nextHeadings = ["summary", "professional summary", "experience", "professional experience", "education", "skills", "technical skills", "certifications", "certification", "references"];
-    const end = lower.findIndex((x, i) => i > start && nextHeadings.includes(x));
-    return lines.slice(start + 1, end > start ? end : Math.min(lines.length, start + 25));
-  };
-
-  const summaryLines = section(["summary", "professional summary"]);
-  const skillsLines = section(["skills", "technical skills"]);
-  const certLines = section(["certifications", "certification"]);
-  const educationLines = section(["education", "academic background"]);
-
-  const skillTokens = skillsLines
-    .join(",")
-    .split(/[,;|•●]+/)
-    .map((x) => x.replace(/^[-*]\s*/, "").trim())
-    .filter((x) => x.length >= 2 && x.length <= 80)
-    .slice(0, 100);
-  const certifications = certLines
-    .map((x) => x.replace(/^[-*•●]\s*/, "").trim())
-    .filter((x) => x.length >= 2 && x.length <= 160)
-    .slice(0, 50);
-  const education = educationLines
-    .map((x) => x.replace(/^[-*•●]\s*/, "").trim())
-    .filter((x) => x.length >= 3 && x.length <= 200)
-    .slice(0, 15)
-    .map((school) => ({ school, degree: "", fieldOfStudy: "", gpa: "", startDate: "", endDate: "", current: false, location: "", description: "" }));
-
-  return {
-    personal,
-    summary: summaryLines.join(" ").slice(0, 3000),
-    targetRole: "",
-    skills: skillTokens,
-    certifications,
-    experience: [],
-    education,
-    websites,
-    workAuth: {},
-    compensation: {},
-    eeo: {},
-  };
 }
 
 export async function parseResumeDocument({
@@ -496,21 +343,16 @@ export async function parseResumeDocument({
   const kind = detectResumeFileKind(buffer, mimeType, filename);
 
   if (kind === "image") {
-    if (!aiEnabled()) return fallbackParseResumeText("");
-    try {
-      const parsed = await parseResumeWithGemini({ buffer, mimeType: mimeType || "image/jpeg", system, shape });
-      return parsed ?? fallbackParseResumeText("");
-    } catch (err) {
-      console.error("[resume-image-fallback] Gemini OCR failed", err);
-      return fallbackParseResumeText("");
-    }
+    const parsed = await parseResumeWithGemini({ buffer, mimeType: mimeType || "image/jpeg", system, shape });
+    if (!parsed) throw new Error("This resume is an image. Add GOOGLE_API_KEY to enable OCR/vision parsing.");
+    return parsed;
   }
 
   let text = "";
   try {
     text = await extractResumeText({ buffer, mimeType, filename });
   } catch (err) {
-    if (kind === "pdf" && aiEnabled()) {
+    if (kind === "pdf") {
       const parsed = await parseResumeWithGemini({
         buffer,
         mimeType: mimeType || "application/pdf",
@@ -522,42 +364,30 @@ export async function parseResumeDocument({
     throw err;
   }
 
-  if (text.trim().length < 20) {
-    if (kind === "pdf" && aiEnabled()) {
-      try {
-        const parsed = await parseResumeWithGemini({
-          buffer,
-          mimeType: mimeType || "application/pdf",
-          system,
-          shape,
-        });
-        if (parsed) return parsed;
-      } catch (err) {
-        console.error("[resume-pdf-ocr-fallback] Gemini OCR failed", err);
-      }
+  if (text.trim().length < 60) {
+    if (kind === "pdf") {
+      const parsed = await parseResumeWithGemini({
+        buffer,
+        mimeType: mimeType || "application/pdf",
+        system,
+        shape,
+      });
+      if (parsed) return parsed;
     }
-    return fallbackParseResumeText("");
+    throw new Error("That file has almost no readable text. If it is a scanned PDF, retry after ensuring GOOGLE_API_KEY is configured.");
   }
 
-  // Local extraction is always complete first. If Gemini is not configured or
-  // temporarily fails, return a conservative deterministic parse instead of
-  // turning an otherwise valid upload into a 500/503.
-  if (!aiEnabled()) return fallbackParseResumeText(text);
-
-  // Keep the provider payload deliberately small so normal resumes don't
-  // spend the whole serverless budget on a huge prompt. Deterministic local
-  // parsing remains the fallback for anything we truncate or can't model.
-  const parseLimit = 180_000;
-  const boundedText = text.length > parseLimit ? text.slice(0, parseLimit) : text;
-  const truncationNote = text.length > parseLimit
-    ? `\n\n[The source document was exceptionally large; only the first ${parseLimit} characters were sent to the model.]`
+  // Do not truncate normal resumes at 24k characters. Gemini 2.5 Flash supports
+  // a 1M-token context window, so the complete extracted resume is preserved.
+  // A defensive ceiling keeps pathological files inside the model context while
+  // still supporting far more than 10-page resumes.
+  const boundedText = text.length > MAX_RESUME_TEXT_CHARS
+    ? text.slice(0, MAX_RESUME_TEXT_CHARS)
+    : text;
+  const truncationNote = text.length > MAX_RESUME_TEXT_CHARS
+    ? "\n\n[The source document was exceptionally large; the first 900,000 characters were sent to the model.]"
     : "";
   const prompt = `Resume text:\n\"\"\"\n${boundedText}\n\"\"\"${truncationNote}\n\nReturn JSON in exactly this shape:\n${shape}`;
 
-  try {
-    return await askAIJSONResilient<Record<string, unknown>>(system, prompt, 3500);
-  } catch (err: any) {
-    console.error("[resume-parse-fallback] Gemini failed; returning deterministic extraction.", err);
-    return fallbackParseResumeText(text);
-  }
+  return await askAIJSONFast<Record<string, unknown>>(system, prompt, 5000);
 }
