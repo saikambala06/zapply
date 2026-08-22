@@ -5,6 +5,7 @@ import { normalizeParsedResume } from "@/lib/profile-shape";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
+export const preferredRegion = "iad1";
 
 const MAX_BYTES = 4 * 1024 * 1024;
 
@@ -78,6 +79,9 @@ export const POST = handler(async (req: Request) => {
     // opaque 500 errors. AI/provider errors are allowed to bubble to handler().
     if (/couldn't read this (pdf|docx|legacy doc)|unsupported resume format|almost no readable text|password protected|encrypted|corrupted/i.test(message)) {
       return fail(message, 422);
+    }
+    if (/AI features need|provider rejected|Gemini|AI request failed|AI provider is|rate limiting|request didn't go through/i.test(message)) {
+      return fail(message, 503);
     }
     throw err;
   }

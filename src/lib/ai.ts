@@ -173,6 +173,56 @@ export function parseJson<T>(raw: string): T {
   }
 }
 
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = 45000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (err: any) {
+    if (err?.name === "AbortError") throw new Error("Gemini timed out while reading the resume. Please try again with a smaller PDF/DOCX.");
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function askGeminiJSON<T>(system: string, user: string, maxOutputTokens = 4500): Promise<T> {
+  const key = process.env.GEMINI_API_KEY || "";
+  if (!key) throw new Error(AI_SETUP_HINT);
+  const models = Array.from(new Set([process.env.GEMINI_MODEL || "gemini-3.7-flash", "gemini-2.5-flash"].filter(Boolean)));
+  let lastError = "Gemini could not parse the resume.";
+
+  for (const geminiModel of models) {
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(geminiModel)}:generateContent?key=${encodeURIComponent(key)}`;
+    try {
+      const res = await fetchWithTimeout(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: `${system}\n\n${user}` }] }],
+          generationConfig: { temperature: 0.1, maxOutputTokens, responseMimeType: "application/json" },
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const text = data?.candidates?.[0]?.content?.parts?.map((part: any) => part?.text || "").join("\n").trim();
+        if (!text) throw new Error("Gemini returned an empty resume parsing response.");
+        return parseJson<T>(text);
+      }
+      const detail = await res.text().catch(() => "");
+      if (res.status === 401 || res.status === 403) throw new Error("The Gemini provider rejected GEMINI_API_KEY. Check the key in Vercel.");
+      if (res.status === 429) throw new Error("Gemini is rate limiting requests. Try again in a moment.");
+      if (res.status === 404) { lastError = `Gemini model ${geminiModel} is unavailable.`; continue; }
+      lastError = `Gemini request failed (${res.status}). ${detail.slice(0, 220)}`;
+    } catch (err: any) {
+      if (/API key|rate limiting/i.test(String(err?.message))) throw err;
+      lastError = String(err?.message || lastError);
+    }
+  }
+  throw new Error(lastError);
+}
+
 /** Compact profile text used as context for scoring and answer generation. */
 export function profileToContext(p: any) {
   const exp = (p.experience ?? [])
@@ -311,38 +361,42 @@ async function parseResumeWithGemini({
 }: { buffer: Buffer; mimeType: string; system: string; shape: string }) {
   const key = process.env.GEMINI_API_KEY || "";
   if (!key) return null;
+  const models = Array.from(new Set([process.env.GEMINI_MODEL || "gemini-3.7-flash", "gemini-2.5-flash"].filter(Boolean)));
+  const safeMime = /^(application\/(pdf|msword|vnd\.openxmlformats-officedocument\.wordprocessingml\.document)|image\/(png|jpe?g|webp))$/i.test(mimeType) ? mimeType : "application/pdf";
+  const prompt = `${system}\n\nThe attached resume may be scanned. Read every page with OCR/vision as needed. Preserve exact facts and never invent missing data. Return JSON in exactly this shape:\n${shape}`;
+  let lastError = "Resume OCR could not read the document.";
 
-  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
-  const prompt = `${system}\n\nThe attached resume may be a scanned document. Use OCR/vision as needed. Preserve exact facts from the document and never invent missing data. Return JSON in exactly this shape:\n${shape}`;
-
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{
-        role: "user",
-        parts: [
-          { text: prompt },
-          { inline_data: { mime_type: mimeType || "application/pdf", data: buffer.toString("base64") } },
-        ],
-      }],
-      generationConfig: {
-        temperature: 0.1,
-        maxOutputTokens: 6000,
-        responseMimeType: "application/json",
-      },
-    }),
-  });
-
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    throw new Error(`Resume OCR failed (${res.status}). ${detail.slice(0, 180)}`);
+  for (const model of models) {
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
+    try {
+      const res = await fetchWithTimeout(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [
+            { text: prompt },
+            { inline_data: { mime_type: safeMime, data: buffer.toString("base64") } },
+          ]}],
+          generationConfig: { temperature: 0.1, maxOutputTokens: 4500, responseMimeType: "application/json" },
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const text = data?.candidates?.[0]?.content?.parts?.map((part: any) => part?.text || "").join("\n").trim();
+        if (!text) throw new Error("The OCR service returned no resume data.");
+        return parseJson<Record<string, unknown>>(text);
+      }
+      const detail = await res.text().catch(() => "");
+      if (res.status === 401 || res.status === 403) throw new Error("The Gemini provider rejected GEMINI_API_KEY. Check the key in Vercel.");
+      if (res.status === 429) throw new Error("Gemini is rate limiting requests. Try again in a moment.");
+      if (res.status === 404) { lastError = `Gemini model ${model} is unavailable.`; continue; }
+      lastError = `Resume OCR failed (${res.status}). ${detail.slice(0, 220)}`;
+    } catch (err: any) {
+      if (/API key|rate limiting/i.test(String(err?.message))) throw err;
+      lastError = String(err?.message || lastError);
+    }
   }
-  const data = await res.json();
-  const text = data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text || "").join("\n").trim();
-  if (!text) throw new Error("The OCR service returned no resume data.");
-  return parseJson<Record<string, unknown>>(text);
+  throw new Error(lastError);
 }
 
 /** Reads a resume file and returns structured profile sections. */
@@ -386,10 +440,11 @@ export async function parseResumeDocument({
   }
 
   // Keep substantially more resume text. Truncating at 14k was causing long
-  // resumes to lose later experience, education and certifications.
-  return askAIJSON<Record<string, unknown>>(
-    system,
-    `Resume text:\n"""\n${text.slice(0, 30000)}\n"""\n\nReturn JSON in exactly this shape:\n${shape}`,
-    6000
-  );
+  // resumes to lose later experience, education and certifications. If Groq/AI
+  // is not configured but Gemini is, use Gemini for the structured extraction
+  // instead of returning a 500 for otherwise valid PDF/DOCX uploads.
+  const prompt = `Resume text:\n"""\n${text.slice(0, 24000)}\n"""\n\nReturn JSON in exactly this shape:\n${shape}`;
+  if (aiEnabled()) return askAIJSON<Record<string, unknown>>(system, prompt, 4500);
+  if (process.env.GEMINI_API_KEY) return askGeminiJSON<Record<string, unknown>>(system, prompt, 4500);
+  throw new Error(AI_SETUP_HINT);
 }
