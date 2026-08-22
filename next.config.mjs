@@ -3,7 +3,7 @@ const nextConfig = {
   reactStrictMode: true,
   // Mongoose must stay a real Node module — bundling it breaks its driver.
   // (On Next 15+ this option is renamed to the top-level `serverExternalPackages`.)
-  experimental: { serverComponentsExternalPackages: ["mongoose", "unpdf", "mammoth", "word-extractor"] },
+  experimental: { serverComponentsExternalPackages: ["mongoose", "unpdf", "mammoth"] },
   async headers() {
     return [
       {

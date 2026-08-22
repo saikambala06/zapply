@@ -2,7 +2,7 @@
   "name": "zapply",
   "version": "1.0.0",
   "private": true,
-  "description": "Zapply — one-click job application autofill, tracking and AI answers.",
+  "description": "Zapply \u2014 one-click job application autofill, tracking and AI answers.",
   "scripts": {
     "dev": "next dev",
     "build": "next build",

@@ -50,8 +50,8 @@ Only two variables are required:
 | `MONGODB_URI` | **yes** | — |
 | `JWT_SECRET` | **yes** | — (`openssl rand -base64 48`) |
 | `NEXT_PUBLIC_APP_URL` | **in production** | OAuth redirects, reset links and Stripe returns point at localhost |
-| `GROQ_API_KEY` | no | Scoring falls back to keyword overlap; drafting and resume parsing return a clear "not configured" message |
-| `AI_BASE_URL` / `AI_MODEL` / `AI_API_KEY` | no | Defaults to Groq. Set these to use any other OpenAI-compatible provider |
+| `GOOGLE_API_KEY` | no | Gemini-powered scoring, drafting and resume parsing; scoring falls back to keyword overlap when no key is configured |
+| `GEMINI_MODEL` | no | Optional Gemini model override; defaults to `gemini-2.5-flash` |
 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PREMIUM_PRICE_ID` | no | Upgrading marks the account Premium directly, so the flow stays testable |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | no | The Google button returns a clear error |
 | `RESEND_API_KEY`, `EMAIL_FROM` | no | Reset emails are logged server-side; in dev the link is returned to the browser |
@@ -123,7 +123,7 @@ This is the part that makes or breaks a tool like this, so it's worth explaining
 
 ### What Premium changes in that flow
 
-With a Premium account and a `GROQ_API_KEY` set, two extra steps run inside the same fill:
+With a Premium account and a `GOOGLE_API_KEY` set, two extra steps run inside the same fill:
 
 1. **Before filling** — if you keep more than one profile, the extension sends the posting to `/api/ai/score`, which ranks your profiles against it. The winner is used for the fill, and the status pill tells you which one and why (`Using "Backend roles" — 87% match`). Without an API key this falls back to keyword overlap rather than failing.
 2. **After filling** — up to four open-ended questions that no rule and no saved answer covered get drafted from your own profile via `/api/ai/answer`. Drafts are outlined in violet so they read differently from filled facts, and whatever you edit before submitting is what gets saved as the reusable answer.
@@ -181,33 +181,15 @@ The token lives in `chrome.storage.local` and only the background worker touches
 
 ## The AI provider
 
-AI runs on [Groq](https://console.groq.com) — free tier, no credit card. Get a key, set `GROQ_API_KEY`, done.
+AI runs on [Google Gemini](https://ai.google.dev/) using the Gemini API free tier. Get a key from Google AI Studio, set `GOOGLE_API_KEY`, and redeploy.
 
-Nothing in `src/lib/ai.ts` is Groq-specific beyond the defaults. It speaks plain OpenAI-compatible `/chat/completions`, so swapping providers is two environment variables and no code change:
-
-| Provider | `AI_BASE_URL` | `AI_MODEL` |
-|---|---|---|
-| **Groq** (default) | `https://api.groq.com/openai/v1` | `openai/gpt-oss-120b` |
-| xAI (Grok) | `https://api.x.ai/v1` | `grok-4` |
-| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
-| OpenRouter | `https://openrouter.ai/api/v1` | any routed model |
-| Ollama (local) | `http://localhost:11434/v1` | `llama3.1` |
-
-Put the key in `AI_API_KEY` when using anything other than Groq, so the variable name isn't lying about which service it belongs to.
-
-**Three provider quirks the layer handles for you**, none of which are obvious from the docs:
-
-1. **JSON mode needs the word "JSON" in the prompt.** Groq's `json_object` response format rejects requests whose messages never mention it. Every JSON prompt here says so explicitly.
-2. **Reasoning models break JSON mode unless reasoning is hidden.** `gpt-oss` and `qwen3` emit a thinking block by default, which isn't valid JSON. The layer sets `reasoning_format: "hidden"` whenever JSON mode is on — required, not cosmetic.
-3. **The free tier is 30 requests/minute.** The drafting pass can fire four calls back to back, so 429s and 5xx are retried with backoff, honouring `Retry-After` when the provider sends it.
-
-Model IDs move. Groq deprecated its Llama chat models (`llama-3.3-70b-versatile` and friends), which is why the default is `openai/gpt-oss-120b`. If that one goes too, set `AI_MODEL` rather than editing code — check [console.groq.com/docs/models](https://console.groq.com/docs/models) for what's current.
+The project uses Gemini as its only AI provider. `GEMINI_MODEL` is optional and defaults to `gemini-2.5-flash`. No Groq, OpenAI-compatible, OpenRouter, xAI, or other AI credentials are required.
 
 ### Resume parsing
 
-Groq's models take text only, so resume text is extracted server-side before it reaches the model: [unpdf](https://github.com/unjs/unpdf) for PDFs (pdf.js under the hood, no native bindings, works on Vercel) and mammoth for `.docx`.
+PDFs are extracted server-side with `unpdf`, and DOCX files with `mammoth`, before the text is sent to Gemini. The parser no longer truncates normal resumes at 24,000 characters; it preserves the complete extracted text up to a large defensive ceiling, which is far beyond typical 10+ page resumes. Gemini 2.5 Flash supports a 1M-token context window, so long resumes do not lose their later experience, education, skills, or certifications.
 
-One consequence worth knowing: this is plain text extraction, so heavily designed two-column resumes can interleave columns and parse less accurately than a single-column layout. If a parse comes back scrambled, that's usually why. Image-only PDFs and scans have no text to extract at all and return a clear error rather than silent nonsense.
+For scanned/image-only PDFs and image resumes, Gemini's multimodal input is used as the OCR fallback. Legacy binary `.DOC` is not converted server-side on Vercel; save it as `.DOCX` or PDF for reliable extraction.
 
 ## Security
 
@@ -225,7 +207,7 @@ One consequence worth knowing: this is plain text extraction, so heavily designe
 - **Applications are unique per `(userId, url)`**, so re-submitting a posting updates the row rather than duplicating it. The extension also checks before filling and warns you instead of quietly applying twice.
 - **Profile exports don't include documents.** A base64 resume would bloat the JSON; re-attach it after importing.
 - **AI-drafted answers are outlined in violet on the page** so they read differently from filled facts — they're meant to be reviewed, and whatever you edit is what gets saved.
-- **AI features degrade gracefully.** Profile scoring falls back to keyword overlap without a `GROQ_API_KEY`; billing falls back to a mock upgrade without Stripe keys.
+- **AI features degrade gracefully.** Profile scoring falls back to keyword overlap without a `GOOGLE_API_KEY`; billing falls back to a mock upgrade without Stripe keys.
 - Adding a new ATS is one entry in `extension/lib/ats.js`. Most sites already work through the generic adapter, since matching is label-driven rather than selector-driven.
 
 ---

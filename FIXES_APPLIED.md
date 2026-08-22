@@ -31,3 +31,12 @@
 
 ## Important limitation
 No browser extension can guarantee correct filling on every arbitrary custom application site. The extension now has broader generic label/ARIA matching, common ATS adapters, iframe command relay, framework-safe value setting, validation repair, and AI fallback, but a site that intentionally blocks automation or uses an inaccessible proprietary widget may still require manual review.
+
+
+## Resume upload stability fix
+
+- Resume storage now uses an atomic MongoDB update instead of `profile.save()` after attaching a large base64 document.
+- Uploads are capped at 3 MB for the profile attachment path so the base64 representation stays within safe Vercel/MongoDB limits.
+- Parser requests have a 4 MB guard and return actionable 413 errors instead of a generic 500 reference code.
+- Empty files and BSON/request-size failures now return clear client errors.
+- The profile UI now displays the real 3 MB attachment limit.
